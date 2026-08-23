@@ -61,14 +61,33 @@ aio_timeout_total = int(os.getenv("OHOTA_AIO_TIMEOUT", "60"))
 session = None
 bot = None
 
+
 async def init_bot():
-    """Инициализирует aiohttp сессию и бота внутри async контекста"""
+    """Инициализирует aiohttp сессию и бота внутри активного asyncio event loop."""
     global session, bot
-    
-    connector = aiohttp.TCPConnector(limit=aio_limit, keepalive_timeout=aio_keepalive)
-    timeout = aiohttp.ClientTimeout(total=aio_timeout_total)
-    session = aiohttp.ClientSession(connector=connector, timeout=timeout)
-    
+
+    # ВАЖНО:
+    # Явно получаем уже запущенный event loop.
+    # Это исправляет:
+    # RuntimeError: no running event loop
+    loop = asyncio.get_running_loop()
+
+    connector = aiohttp.TCPConnector(
+        limit=aio_limit,
+        keepalive_timeout=aio_keepalive,
+        loop=loop,
+    )
+
+    timeout = aiohttp.ClientTimeout(
+        total=aio_timeout_total
+    )
+
+    session = aiohttp.ClientSession(
+        connector=connector,
+        timeout=timeout,
+        loop=loop,
+    )
+
     bot = Bot(
         token=BOT_TOKEN,
         session=session,
@@ -76,6 +95,7 @@ async def init_bot():
             parse_mode=ParseMode.HTML
         )
     )
+
 
 dp = Dispatcher(
     storage=MemoryStorage()
@@ -93,6 +113,7 @@ def get_db():
 
 def init_db():
     connection = get_db()
+
     try:
         cursor = connection.cursor()
 
@@ -154,10 +175,12 @@ def init_db():
         """)
 
         cursor.execute("""
-            INSERT OR IGNORE INTO settings (key, value) VALUES ('beta_mode', '0')
+            INSERT OR IGNORE INTO settings (key, value)
+            VALUES ('beta_mode', '0')
         """)
 
         connection.commit()
+
     finally:
         connection.close()
 
@@ -168,20 +191,25 @@ def init_db():
 
 def get_setting(key, default=""):
     connection = get_db()
+
     try:
         row = connection.execute(
             "SELECT value FROM settings WHERE key = ?",
             (key,)
         ).fetchone()
+
         if row is None:
             return default
+
         return row["value"]
+
     finally:
         connection.close()
 
 
 def set_setting(key, value):
     connection = get_db()
+
     try:
         connection.execute(
             """
@@ -191,17 +219,26 @@ def set_setting(key, value):
             """,
             (key, str(value))
         )
+
         connection.commit()
+
     finally:
         connection.close()
 
 
 def save_user(user_id, username, first_name):
     connection = get_db()
+
     try:
         connection.execute("""
-            INSERT INTO users (user_id, username, first_name, created_at)
+            INSERT INTO users (
+                user_id,
+                username,
+                first_name,
+                created_at
+            )
             VALUES (?, ?, ?, ?)
+
             ON CONFLICT(user_id) DO UPDATE SET
                 username = excluded.username,
                 first_name = excluded.first_name
@@ -211,25 +248,34 @@ def save_user(user_id, username, first_name):
             first_name or "",
             datetime.now().isoformat()
         ))
+
         connection.commit()
+
     finally:
         connection.close()
 
 
 def is_admin(user_id):
-    return (ADMIN_ID != 0 and user_id == ADMIN_ID)
+    return (
+        ADMIN_ID != 0
+        and user_id == ADMIN_ID
+    )
 
 
 def is_beta_tester(user_id):
     if is_admin(user_id):
         return True
+
     connection = get_db()
+
     try:
         row = connection.execute(
             "SELECT user_id FROM beta_testers WHERE user_id = ?",
             (user_id,)
         ).fetchone()
+
         return row is not None
+
     finally:
         connection.close()
 
@@ -264,18 +310,31 @@ def delete_game(user_id):
 def game_elapsed(game):
     if not game:
         return 0
-    return max(0, int(time.monotonic() - game["started"]))
+
+    return max(
+        0,
+        int(time.monotonic() - game["started"])
+    )
 
 
 def game_expired(game):
-    return (game is not None) and (game_elapsed(game) >= GAME_TIME)
+    return (
+        game is not None
+        and game_elapsed(game) >= GAME_TIME
+    )
 
 
 def game_header(game):
     elapsed = game_elapsed(game)
-    remaining = max(0, GAME_TIME - elapsed)
+
+    remaining = max(
+        0,
+        GAME_TIME - elapsed
+    )
+
     minutes = remaining // 60
     seconds = remaining % 60
+
     return (
         "\n"
         "━━━━━━━━━━━━━━━━━━\n"
@@ -288,25 +347,37 @@ def game_header(game):
 
 def save_active_game(user_id):
     game = games.get(user_id)
+
     if not game:
         return False
+
     game.setdefault("step", 0)
     game.setdefault("started", time.monotonic())
     game.setdefault("clues", set())
     game.setdefault("interactions", 0)
     game.setdefault("screen", "story")
+
     return True
 
 
 async def check_game(callback: CallbackQuery):
     user_id = callback.from_user.id
     game = get_game(user_id)
+
     if not game:
-        await callback.answer("Активной охоты нет.", show_alert=True)
+        await callback.answer(
+            "Активной охоты нет.",
+            show_alert=True
+        )
         return None
+
     if game_expired(game):
-        await finish_game(callback, timeout=True)
+        await finish_game(
+            callback,
+            timeout=True
+        )
         return None
+
     return game
 
 
@@ -417,9 +488,14 @@ STORY = [
 
 
 # ============================================================
-# ОБРАБОТЧИКИ (Placeholder)
+# ОБРАБОТЧИКИ
 # ============================================================
-# Добавьте сюда ваши обработчики команд и сообщений
+# ВАЖНО:
+# Здесь должны находиться твои существующие обработчики.
+# Их не удаляй и вставь сюда из своего оригинального main.py.
+#
+# Я специально не придумываю их заново, потому что ты попросил
+# не менять механику игры.
 
 
 # ============================================================
@@ -427,19 +503,26 @@ STORY = [
 # ============================================================
 
 async def main():
-    """Главная функция для запуска бота"""
-    await init_bot()
+    """Главная функция для запуска бота."""
+
     init_db()
-    
+
+    await init_bot()
+
     logger.info("🤖 Бот запущен!")
-    
+
     try:
         await dp.start_polling(bot)
+
     except Exception as e:
-        logger.error(f"Ошибка при запуске: {e}")
+        logger.exception(
+            f"Ошибка при запуске: {e}"
+        )
+
     finally:
         if session:
             await session.close()
+
         logger.info("🛑 Бот остановлен")
 
 
