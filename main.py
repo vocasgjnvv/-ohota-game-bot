@@ -4,11 +4,12 @@ import os
 import sqlite3
 import time
 from datetime import datetime
+from html import escape
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -37,8 +38,7 @@ logging.basicConfig(
 
 
 # ============================================================
-# BOT / DISPATCHER
-# ВАЖНО: создаём ДО обработчиков @dp...
+# BOT
 # ============================================================
 
 if not BOT_TOKEN:
@@ -81,7 +81,9 @@ def init_db():
             user_id INTEGER NOT NULL,
             message TEXT NOT NULL,
             created_at TEXT NOT NULL,
-            answered INTEGER DEFAULT 0
+            answered INTEGER DEFAULT 0,
+            answer TEXT DEFAULT '',
+            answered_at TEXT DEFAULT ''
         )
     """)
 
@@ -101,6 +103,16 @@ def init_db():
             clues INTEGER DEFAULT 0,
             interactions INTEGER DEFAULT 0,
             finished_at TEXT NOT NULL
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            username TEXT DEFAULT '',
+            message TEXT NOT NULL,
+            created_at TEXT NOT NULL
         )
     """)
 
@@ -138,8 +150,36 @@ def is_admin(user_id):
     return ADMIN_ID != 0 and user_id == ADMIN_ID
 
 
+def is_beta_tester(user_id):
+    if is_admin(user_id):
+        return True
+
+    connection = get_db()
+
+    row = connection.execute(
+        "SELECT user_id FROM beta_testers WHERE user_id = ?",
+        (user_id,)
+    ).fetchone()
+
+    connection.close()
+
+    return row is not None
+
+
+def beta_mode_enabled():
+    connection = get_db()
+
+    count = connection.execute(
+        "SELECT COUNT(*) FROM beta_testers"
+    ).fetchone()[0]
+
+    connection.close()
+
+    return count > 0
+
+
 # ============================================================
-# GAME STATE
+# GAME
 # ============================================================
 
 games = {}
@@ -153,8 +193,16 @@ class SupportState(StatesGroup):
     waiting_message = State()
 
 
+class SupportReplyState(StatesGroup):
+    waiting_reply = State()
+
+
 class BetaState(StatesGroup):
     waiting_user_id = State()
+
+
+class ChatState(StatesGroup):
+    waiting_message = State()
 
 
 # ============================================================
@@ -548,8 +596,17 @@ def interaction_keyboard():
 # ============================================================
 
 async def send_main_menu(message: Message):
+    beta_text = ""
+
+    if beta_mode_enabled() and not is_beta_tester(message.from_user.id):
+        beta_text = """
+🧪 <b>Сейчас открыт закрытый бета-тест.</b>
+
+Доступ к охоте имеют приглашённые тестеры.
+"""
+
     await message.answer(
-        """
+        f"""
 🔎 <b>OHOTA</b>
 
 Одна история.
@@ -565,6 +622,8 @@ async def send_main_menu(message: Message):
 🏆 Побеждает тот,
 кто быстрее пройдёт расследование.
 
+{beta_text}
+
 <b>Готов начать?</b>
 """,
         reply_markup=main_keyboard(message.from_user.id)
@@ -572,7 +631,7 @@ async def send_main_menu(message: Message):
 
 
 # ============================================================
-# /START
+# START
 # ============================================================
 
 @dp.message(CommandStart())
@@ -588,10 +647,6 @@ async def command_start(message: Message, state: FSMContext):
     await send_main_menu(message)
 
 
-# ============================================================
-# "СТАРТ"
-# ============================================================
-
 @dp.message(F.text.casefold() == "старт")
 async def text_start(message: Message, state: FSMContext):
     await state.clear()
@@ -599,7 +654,7 @@ async def text_start(message: Message, state: FSMContext):
 
 
 # ============================================================
-# BACK
+# BACK MAIN
 # ============================================================
 
 @dp.callback_query(F.data == "back_main")
@@ -657,6 +712,13 @@ async def how_to_play(callback: CallbackQuery):
 async def game_start(callback: CallbackQuery):
     user_id = callback.from_user.id
 
+    if beta_mode_enabled() and not is_beta_tester(user_id):
+        await callback.answer(
+            "Сейчас доступ только для бета-тестеров.",
+            show_alert=True
+        )
+        return
+
     games[user_id] = {
         "step": 0,
         "started": time.monotonic(),
@@ -672,7 +734,7 @@ async def game_start(callback: CallbackQuery):
 """
     )
 
-    await asyncio.sleep(0.35)
+    await asyncio.sleep(0.25)
 
     await callback.message.edit_text(
         """
@@ -682,7 +744,7 @@ async def game_start(callback: CallbackQuery):
 """
     )
 
-    await asyncio.sleep(0.35)
+    await asyncio.sleep(0.25)
 
     await callback.message.edit_text(
         """
@@ -692,7 +754,7 @@ async def game_start(callback: CallbackQuery):
 """
     )
 
-    await asyncio.sleep(0.35)
+    await asyncio.sleep(0.25)
 
     await callback.message.edit_text(
         """
@@ -702,7 +764,7 @@ async def game_start(callback: CallbackQuery):
 """
     )
 
-    await asyncio.sleep(0.35)
+    await asyncio.sleep(0.25)
 
     await callback.message.edit_text(
         """
@@ -714,10 +776,9 @@ async def game_start(callback: CallbackQuery):
 """
     )
 
-    await asyncio.sleep(0.5)
+    await asyncio.sleep(0.4)
 
     await show_story(callback)
-
     await callback.answer()
 
 
@@ -727,7 +788,6 @@ async def game_start(callback: CallbackQuery):
 
 async def show_story(callback: CallbackQuery):
     user_id = callback.from_user.id
-
     game = games.get(user_id)
 
     if not game:
@@ -735,6 +795,10 @@ async def show_story(callback: CallbackQuery):
             "Начни новую охоту.",
             show_alert=True
         )
+        return
+
+    if time.monotonic() - game["started"] >= GAME_TIME:
+        await finish_game(callback, timeout=True)
         return
 
     step = game["step"]
@@ -792,7 +856,6 @@ async def show_story(callback: CallbackQuery):
 @dp.callback_query(F.data == "next_story")
 async def next_story(callback: CallbackQuery):
     user_id = callback.from_user.id
-
     game = games.get(user_id)
 
     if not game:
@@ -1001,6 +1064,8 @@ async def location(callback: CallbackQuery):
         )
         return
 
+    games[user_id]["clues"].add("camera")
+
     await callback.message.edit_text(
         """
 👤 <b>ОСМОТР МЕСТА</b>
@@ -1012,11 +1077,13 @@ async def location(callback: CallbackQuery):
 Но индикатор питания мигает.
 
 Кто-то недавно включал систему.
+
+🔎 <b>Улика добавлена.</b>
 """,
-        reply_markup=clue_keyboard()
+        reply_markup=research_keyboard()
     )
 
-    await callback.answer()
+    await callback.answer("Обнаружена новая улика")
 
 
 # ============================================================
@@ -1187,6 +1254,9 @@ async def finish_game(callback: CallbackQuery, timeout=False):
     minutes = elapsed // 60
     seconds = elapsed % 60
 
+    clues_count = len(game["clues"])
+    interactions_count = game["interactions"]
+
     del games[user_id]
 
     await callback.message.edit_text(
@@ -1199,10 +1269,10 @@ async def finish_game(callback: CallbackQuery, timeout=False):
 <b>{minutes:02d}:{seconds:02d}</b>
 
 🔎 Улик:
-<b>{len(game["clues"])}</b>
+<b>{clues_count}</b>
 
 🤝 Взаимодействий:
-<b>{game["interactions"]}</b>
+<b>{interactions_count}</b>
 
 Результат записан в таблицу лидеров.
 """,
@@ -1238,9 +1308,15 @@ async def results(callback: CallbackQuery):
             username = row[0] or "Игрок"
             seconds = row[1]
 
+            display_name = (
+                f"@{escape(username)}"
+                if username != "Игрок"
+                else "Игрок"
+            )
+
             text += (
                 f"<b>{index}.</b> "
-                f"@{username} — "
+                f"{display_name} — "
                 f"<b>{seconds // 60:02d}:{seconds % 60:02d}</b>\n"
             )
 
@@ -1257,21 +1333,150 @@ async def results(callback: CallbackQuery):
 # ============================================================
 
 @dp.callback_query(F.data == "chat")
-async def chat(callback: CallbackQuery):
+async def chat(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(ChatState.waiting_message)
+
+    connection = get_db()
+
+    rows = connection.execute("""
+        SELECT username, message
+        FROM chat_messages
+        ORDER BY id DESC
+        LIMIT 10
+    """).fetchall()
+
+    connection.close()
+
+    text = """
+💬 <b>ЧАТ ИГРОКОВ</b>
+
+Здесь общаются игроки OHOTA.
+
+Напиши сообщение — оно появится
+у остальных игроков.
+
+"""
+
+    if rows:
+        text += "<b>Последние сообщения:</b>\n\n"
+
+        for username, message in reversed(rows):
+            name = f"@{escape(username)}" if username else "Игрок"
+
+            text += (
+                f"<b>{name}</b>: "
+                f"{escape(message[:300])}\n\n"
+            )
+
+    else:
+        text += "Пока сообщений нет.\n"
+
+    text += "\n<i>Напиши сообщение ниже.</i>"
+
     await callback.message.edit_text(
-        """
-💬 <b>ЧАТ</b>
-
-Общение игроков.
-
-Здесь можно обсуждать охоту,
-делиться впечатлениями
-и соревноваться с другими.
-""",
-        reply_markup=back_keyboard()
+        text,
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="◀️ Выйти из чата",
+                        callback_data="back_main"
+                    )
+                ]
+            ]
+        )
     )
 
     await callback.answer()
+
+
+@dp.message(ChatState.waiting_message)
+async def receive_chat_message(
+    message: Message,
+    state: FSMContext
+):
+    if not message.text:
+        await message.answer(
+            "В чат можно отправить только текст."
+        )
+        return
+
+    if message.text.casefold() == "старт":
+        await state.clear()
+        await send_main_menu(message)
+        return
+
+    username = message.from_user.username or ""
+    safe_username = escape(username)
+    safe_message = escape(message.text)
+
+    connection = get_db()
+
+    connection.execute("""
+        INSERT INTO chat_messages (
+            user_id,
+            username,
+            message,
+            created_at
+        )
+        VALUES (?, ?, ?, ?)
+    """, (
+        message.from_user.id,
+        username,
+        message.text,
+        datetime.now().isoformat()
+    ))
+
+    users = connection.execute(
+        "SELECT user_id FROM users"
+    ).fetchall()
+
+    connection.commit()
+    connection.close()
+
+    chat_text = (
+        f"💬 <b>ЧАТ</b>\n\n"
+        f"<b>@{safe_username if username else 'Игрок'}</b>:\n"
+        f"{safe_message}"
+    )
+
+    sent = 0
+
+    for row in users:
+        target_id = row[0]
+
+        try:
+            await bot.send_message(
+                target_id,
+                chat_text
+            )
+            sent += 1
+        except Exception:
+            pass
+
+    await message.answer(
+        f"""
+✅ <b>Сообщение отправлено.</b>
+
+Его получили активные пользователи чата.
+""",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="💬 Продолжить чат",
+                        callback_data="chat"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="🏠 Главное меню",
+                        callback_data="back_main"
+                    )
+                ]
+            ]
+        )
+    )
 
 
 # ============================================================
@@ -1279,7 +1484,10 @@ async def chat(callback: CallbackQuery):
 # ============================================================
 
 @dp.callback_query(F.data == "support")
-async def support(callback: CallbackQuery, state: FSMContext):
+async def support(
+    callback: CallbackQuery,
+    state: FSMContext
+):
     await state.set_state(SupportState.waiting_message)
 
     await callback.message.edit_text(
@@ -1292,8 +1500,8 @@ async def support(callback: CallbackQuery, state: FSMContext):
 
 <i>«Улика не открывается»</i>
 
-После отправки обращение попадёт
-в твоё пространство администратора.
+Обращение сохранится
+в твоём пространстве администратора.
 """,
         reply_markup=back_keyboard()
     )
@@ -1319,18 +1527,21 @@ async def receive_support(
 
     connection = get_db()
 
-    connection.execute("""
+    cursor = connection.execute("""
         INSERT INTO support (
             user_id,
             message,
-            created_at
+            created_at,
+            answered
         )
-        VALUES (?, ?, ?)
+        VALUES (?, ?, ?, 0)
     """, (
         message.from_user.id,
         message.text,
         datetime.now().isoformat()
     ))
+
+    support_id = cursor.lastrowid
 
     connection.commit()
     connection.close()
@@ -1342,6 +1553,9 @@ async def receive_support(
 ✅ <b>Сообщение отправлено.</b>
 
 Обращение сохранено.
+
+Администратор сможет ответить
+тебе прямо через бота.
 """,
         reply_markup=main_keyboard(message.from_user.id)
     )
@@ -1351,17 +1565,28 @@ async def receive_support(
             await bot.send_message(
                 ADMIN_ID,
                 f"""
-🆘 <b>НОВОЕ ОБРАЩЕНИЕ</b>
+🆘 <b>НОВОЕ ОБРАЩЕНИЕ #{support_id}</b>
 
-ID: <code>{message.from_user.id}</code>
+👤 ID:
+<code>{message.from_user.id}</code>
 
-Пользователь:
-@{message.from_user.username or "без username"}
+👤 Пользователь:
+@{escape(message.from_user.username or "без username")}
 
-Сообщение:
+💬 Сообщение:
 
-{message.text}
-"""
+{escape(message.text)}
+""",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="✏️ Ответить",
+                                callback_data=f"support_reply:{support_id}"
+                            )
+                        ]
+                    ]
+                )
             )
         except Exception as error:
             logging.error(
@@ -1505,6 +1730,10 @@ async def admin_users(callback: CallbackQuery):
         "SELECT COUNT(*) FROM users"
     ).fetchone()[0]
 
+    beta = connection.execute(
+        "SELECT COUNT(*) FROM beta_testers"
+    ).fetchone()[0]
+
     connection.close()
 
     await callback.message.edit_text(
@@ -1516,6 +1745,9 @@ async def admin_users(callback: CallbackQuery):
 
 Сейчас проходят охоту:
 <b>{len(games)}</b>
+
+🧪 Бета-тестеров:
+<b>{beta}</b>
 """,
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
@@ -1548,18 +1780,36 @@ async def admin_beta(
         )
         return
 
+    connection = get_db()
+
+    testers = connection.execute(
+        "SELECT user_id FROM beta_testers ORDER BY added_at DESC"
+    ).fetchall()
+
+    connection.close()
+
+    text = """
+🧪 <b>БЕТА-ТЕСТ</b>
+
+"""
+
+    if testers:
+        text += "<b>Добавленные тестеры:</b>\n\n"
+
+        for row in testers[:30]:
+            text += f"• <code>{row[0]}</code>\n"
+
+        text += "\n"
+
+    else:
+        text += "Тестеров пока нет.\n\n"
+
+    text += "Отправь Telegram ID, чтобы добавить тестера."
+
     await state.set_state(BetaState.waiting_user_id)
 
     await callback.message.edit_text(
-        """
-🧪 <b>БЕТА-ТЕСТ</b>
-
-Отправь Telegram ID тестера.
-
-Например:
-
-<code>123456789</code>
-""",
+        text,
         reply_markup=back_keyboard()
     )
 
@@ -1606,6 +1856,9 @@ async def receive_beta_id(
 
 ID:
 <code>{user_id}</code>
+
+Теперь он сможет начать охоту,
+если бета-режим включён.
 """,
         reply_markup=admin_keyboard()
     )
@@ -1627,41 +1880,211 @@ async def admin_support(callback: CallbackQuery):
     connection = get_db()
 
     rows = connection.execute("""
-        SELECT id, user_id, message, created_at
+        SELECT id, user_id, message, created_at, answered
         FROM support
         ORDER BY id DESC
-        LIMIT 15
+        LIMIT 20
     """).fetchall()
 
     connection.close()
 
     text = "🆘 <b>ОБРАЩЕНИЯ</b>\n\n"
 
+    buttons = []
+
     if not rows:
         text += "Обращений пока нет."
+
     else:
         for row in rows:
+            status = "✅ Отвечено" if row[4] else "🕐 Ожидает ответа"
+
             text += (
-                f"<b>#{row[0]}</b>\n"
+                f"<b>#{row[0]}</b> — {status}\n"
                 f"👤 ID: <code>{row[1]}</code>\n"
-                f"💬 {row[2][:400]}\n\n"
+                f"💬 {escape(row[2][:500])}\n\n"
             )
+
+            if not row[4]:
+                buttons.append([
+                    InlineKeyboardButton(
+                        text=f"✏️ Ответить #{row[0]}",
+                        callback_data=f"support_reply:{row[0]}"
+                    )
+                ])
+
+    buttons.append([
+        InlineKeyboardButton(
+            text="◀️ Назад",
+            callback_data="admin_panel"
+        )
+    ])
 
     await callback.message.edit_text(
         text,
         reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="◀️ Назад",
-                        callback_data="admin_panel"
-                    )
-                ]
-            ]
+            inline_keyboard=buttons
         )
     )
 
     await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("support_reply:"))
+async def support_reply(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+    if not is_admin(callback.from_user.id):
+        await callback.answer(
+            "Доступ запрещён.",
+            show_alert=True
+        )
+        return
+
+    try:
+        support_id = int(
+            callback.data.split(":")[1]
+        )
+    except (ValueError, IndexError):
+        await callback.answer(
+            "Ошибка обращения.",
+            show_alert=True
+        )
+        return
+
+    connection = get_db()
+
+    row = connection.execute("""
+        SELECT user_id, message, answered
+        FROM support
+        WHERE id = ?
+    """, (support_id,)).fetchone()
+
+    connection.close()
+
+    if not row:
+        await callback.answer(
+            "Обращение не найдено.",
+            show_alert=True
+        )
+        return
+
+    if row[2]:
+        await callback.answer(
+            "На это обращение уже ответили.",
+            show_alert=True
+        )
+        return
+
+    await state.set_state(
+        SupportReplyState.waiting_reply
+    )
+
+    await state.update_data(
+        support_id=support_id,
+        target_user_id=row[0]
+    )
+
+    await callback.message.edit_text(
+        f"""
+✏️ <b>ОТВЕТ НА ОБРАЩЕНИЕ #{support_id}</b>
+
+Сообщение пользователя:
+
+<i>{escape(row[1][:1000])}</i>
+
+Напиши ответ одним сообщением.
+""",
+        reply_markup=back_keyboard()
+    )
+
+    await callback.answer()
+
+
+@dp.message(SupportReplyState.waiting_reply)
+async def receive_support_reply(
+    message: Message,
+    state: FSMContext
+):
+    if not is_admin(message.from_user.id):
+        return
+
+    if not message.text:
+        await message.answer(
+            "Отправь текстовый ответ."
+        )
+        return
+
+    data = await state.get_data()
+
+    support_id = data.get("support_id")
+    target_user_id = data.get("target_user_id")
+
+    if not support_id or not target_user_id:
+        await state.clear()
+
+        await message.answer(
+            "Обращение не найдено.",
+            reply_markup=admin_keyboard()
+        )
+        return
+
+    try:
+        await bot.send_message(
+            target_user_id,
+            f"""
+🆘 <b>ОТВЕТ ПОДДЕРЖКИ</b>
+
+{escape(message.text)}
+"""
+        )
+
+    except Exception as error:
+        logging.error(
+            "Support reply error: %s",
+            error
+        )
+
+        await message.answer(
+            """
+❌ Не удалось отправить ответ пользователю.
+
+Возможно, пользователь заблокировал бота.
+"""
+        )
+
+        return
+
+    connection = get_db()
+
+    connection.execute("""
+        UPDATE support
+        SET
+            answered = 1,
+            answer = ?,
+            answered_at = ?
+        WHERE id = ?
+    """, (
+        message.text,
+        datetime.now().isoformat(),
+        support_id
+    ))
+
+    connection.commit()
+    connection.close()
+
+    await state.clear()
+
+    await message.answer(
+        f"""
+✅ <b>Ответ отправлен.</b>
+
+Обращение #{support_id}
+помечено как отвеченное.
+""",
+        reply_markup=admin_keyboard()
+    )
 
 
 # ============================================================
@@ -1700,8 +2123,14 @@ async def admin_results(callback: CallbackQuery):
     for index, row in enumerate(rows, 1):
         username = row[0] or "Игрок"
 
+        display_name = (
+            f"@{escape(username)}"
+            if username != "Игрок"
+            else "Игрок"
+        )
+
         text += (
-            f"{index}. @{username}\n"
+            f"{index}. {display_name}\n"
             f"⏱ {row[1] // 60:02d}:{row[1] % 60:02d}\n"
             f"🔎 Улик: {row[2]}\n"
             f"🤝 Взаимодействий: {row[3]}\n\n"
@@ -1775,6 +2204,12 @@ async def admin_content(callback: CallbackQuery):
 
 @dp.message()
 async def unknown_message(message: Message):
+    save_user(
+        message.from_user.id,
+        message.from_user.username,
+        message.from_user.first_name
+    )
+
     await message.answer(
         """
 🔎 <b>OHOTA</b>
