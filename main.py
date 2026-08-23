@@ -4,26 +4,44 @@ import asyncio
 import logging
 import re
 from contextlib import closing
+
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+
+# =========================
+# НАСТРОЙКИ
+# =========================
+
 TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
-DB_PATH = os.getenv("DB_PATH", "/data/ohota.db")
+
+DB_PATH = os.getenv("DB_PATH", "ohota.db")
 
 if not TOKEN:
-    raise RuntimeError("Не задан BOT_TOKEN")
+    raise RuntimeError(
+        "Не задан BOT_TOKEN. Добавь токен бота в переменную окружения BOT_TOKEN."
+    )
 
-os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+
 bot = Bot(TOKEN)
 dp = Dispatcher()
 
+
+# =========================
+# БАЗА ДАННЫХ
+# =========================
+
 def conn():
-    c = sqlite3.connect(DB_PATH)
-    c.row_factory = sqlite3.Row
-    return c
+    db = sqlite3.connect(DB_PATH)
+    db.row_factory = sqlite3.Row
+    return db
+
 
 def init_db():
     with closing(conn()) as db:
@@ -37,177 +55,427 @@ def init_db():
             investigations INTEGER DEFAULT 0,
             best_place INTEGER,
             interactions INTEGER DEFAULT 0,
-            accusations INTEGER DEFAULT 0
+            accusations INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+
         CREATE TABLE IF NOT EXISTS registrations (
             telegram_id INTEGER,
             hunt_code TEXT,
+            registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(telegram_id, hunt_code)
         );
         """)
         db.commit()
 
-def menu():
+
+def get_user(telegram_id):
+    with closing(conn()) as db:
+        return db.execute(
+            "SELECT * FROM users WHERE telegram_id = ?",
+            (telegram_id,)
+        ).fetchone()
+
+
+def create_user(telegram_id, nickname):
+    with closing(conn()) as db:
+        last_number = db.execute(
+            "SELECT COALESCE(MAX(game_number), 1000) FROM users"
+        ).fetchone()[0]
+
+        game_number = last_number + 1
+
+        db.execute(
+            """
+            INSERT INTO users
+            (telegram_id, game_number, nickname)
+            VALUES (?, ?, ?)
+            """,
+            (telegram_id, game_number, nickname)
+        )
+
+        db.commit()
+
+        return game_number
+
+
+# =========================
+# КЛАВИАТУРЫ
+# =========================
+
+def main_menu():
     kb = InlineKeyboardBuilder()
-    for text, data in [
+
+    buttons = [
         ("🎯 Начать охоту", "hunt"),
         ("👤 Мой профиль", "profile"),
         ("🏆 Рейтинг", "rating"),
         ("📜 Правила", "rules"),
         ("💬 Чат", "chat"),
-    ]:
-        kb.button(text=text, callback_data=data)
+    ]
+
+    for text, callback in buttons:
+        kb.button(text=text, callback_data=callback)
+
     kb.adjust(1)
+
     return kb.as_markup()
 
-def back():
+
+def back_button():
     kb = InlineKeyboardBuilder()
     kb.button(text="⬅️ Назад", callback_data="menu")
     return kb.as_markup()
 
-def get_user(tg_id):
-    with closing(conn()) as db:
-        return db.execute("SELECT * FROM users WHERE telegram_id=?", (tg_id,)).fetchone()
+
+# =========================
+# /START
+# =========================
 
 @dp.message(CommandStart())
 async def start(message: Message):
     user = get_user(message.from_user.id)
+
     if user:
         await message.answer(
-            f"🕵️ <b>ОХОТА</b>\n\nС возвращением, {user['nickname']}! "
-            f"Твой номер: <b>#{user['game_number']}</b>.",
-            reply_markup=menu()
+            f"🕵️ <b>ОХОТА</b>\n\n"
+            f"С возвращением, <b>{user['nickname']}</b>!\n"
+            f"Твой игровой номер: <b>#{user['game_number']}</b>.",
+            reply_markup=main_menu()
         )
-    else:
-        await message.answer(
-            "🕵️ <b>Добро пожаловать в «ОХОТУ»!</b>\n\n"
-            "Придумай игровой псевдоним и отправь его следующим сообщением.\n"
-            "3–20 символов, без мата и оскорблений."
-        )
+        return
+
+    await message.answer(
+        "🕵️ <b>Добро пожаловать в «ОХОТУ»!</b>\n\n"
+        "Это онлайн-игра, где игроки расследуют дела, "
+        "получают зацепки и соревнуются друг с другом.\n\n"
+        "Для начала придумай игровой псевдоним.\n\n"
+        "📌 От 3 до 20 символов.\n"
+        "📌 Буквы, цифры, пробел, дефис или _.\n"
+        "📌 Без оскорблений."
+    )
+
+
+# =========================
+# РЕГИСТРАЦИЯ
+# =========================
 
 @dp.message(F.text)
-async def register(message: Message):
+async def registration(message: Message):
     if message.text.startswith("/"):
         return
-    if get_user(message.from_user.id):
-        await message.answer("Выбери действие:", reply_markup=menu())
+
+    user = get_user(message.from_user.id)
+
+    if user:
+        await message.answer(
+            "Выбери действие:",
+            reply_markup=main_menu()
+        )
         return
 
     nickname = message.text.strip()
-    if not re.fullmatch(r"[A-Za-zА-Яа-яЁё0-9 _-]{3,20}", nickname):
-        await message.answer("❌ Псевдоним должен содержать 3–20 букв, цифр, пробел, дефис или _.")
+
+    if not re.fullmatch(
+        r"[A-Za-zА-Яа-яЁё0-9 _-]{3,20}",
+        nickname
+    ):
+        await message.answer(
+            "❌ Псевдоним должен содержать от 3 до 20 символов.\n"
+            "Разрешены буквы, цифры, пробел, дефис и _."
+        )
         return
 
-    bad = ("хуй", "пизд", "еб", "бляд", "сука", "дебил")
-    if any(x in nickname.lower().replace("ё", "е") for x in bad):
-        await message.answer("❌ Такой псевдоним нельзя использовать.")
+    bad_words = (
+        "хуй",
+        "пизд",
+        "еб",
+        "бляд",
+        "сука",
+        "дебил",
+    )
+
+    normalized = nickname.lower().replace("ё", "е")
+
+    if any(word in normalized for word in bad_words):
+        await message.answer(
+            "❌ Такой псевдоним нельзя использовать."
+        )
         return
 
-    with closing(conn()) as db:
-        last = db.execute("SELECT COALESCE(MAX(game_number),1000) FROM users").fetchone()[0]
-        try:
-            db.execute(
-                "INSERT INTO users (telegram_id,game_number,nickname) VALUES (?,?,?)",
-                (message.from_user.id, last + 1, nickname)
-            )
-            db.commit()
-        except sqlite3.IntegrityError:
-            await message.answer("❌ Этот псевдоним уже занят. Придумай другой.")
-            return
+    try:
+        game_number = create_user(
+            message.from_user.id,
+            nickname
+        )
+
+    except sqlite3.IntegrityError:
+        await message.answer(
+            "❌ Этот псевдоним уже занят.\n"
+            "Придумай другой."
+        )
+        return
 
     await message.answer(
-        f"✅ Регистрация завершена!\n\nИгровой номер: <b>#{last+1}</b>\n"
-        f"Псевдоним: <b>{nickname}</b>",
-        reply_markup=menu()
+        f"✅ <b>Регистрация завершена!</b>\n\n"
+        f"🎫 Игровой номер: <b>#{game_number}</b>\n"
+        f"👤 Псевдоним: <b>{nickname}</b>\n\n"
+        f"Добро пожаловать в «ОХОТУ».",
+        reply_markup=main_menu()
     )
+
+
+# =========================
+# ГЛАВНОЕ МЕНЮ
+# =========================
 
 @dp.callback_query(F.data == "menu")
-async def menu_cb(c: CallbackQuery):
-    await c.message.edit_text("🕵️ <b>Главное меню «ОХОТЫ»</b>", reply_markup=menu())
-    await c.answer()
+async def menu_callback(callback: CallbackQuery):
+    await callback.message.edit_text(
+        "🕵️ <b>Главное меню «ОХОТЫ»</b>",
+        reply_markup=main_menu()
+    )
+
+    await callback.answer()
+
+
+# =========================
+# ПРОФИЛЬ
+# =========================
 
 @dp.callback_query(F.data == "profile")
-async def profile(c: CallbackQuery):
-    u = get_user(c.from_user.id)
-    if not u:
-        await c.message.edit_text("Сначала отправь /start.", reply_markup=back())
-    else:
-        await c.message.edit_text(
-            f"👤 <b>Мой профиль</b>\n\n"
-            f"Номер: <b>#{u['game_number']}</b>\n"
-            f"Псевдоним: <b>{u['nickname']}</b>\n"
-            f"⭐ XP: <b>{u['xp']}</b>\n"
-            f"🏆 Победы: <b>{u['wins']}</b>\n"
-            f"🔎 Расследования: <b>{u['investigations']}</b>\n"
-            f"🥇 Лучшее место: <b>{u['best_place'] or '—'}</b>",
-            reply_markup=back()
-        )
-    await c.answer()
+async def profile(callback: CallbackQuery):
+    user = get_user(callback.from_user.id)
 
-@dp.callback_query(F.data == "rules")
-async def rules(c: CallbackQuery):
-    await c.message.edit_text(
-        "📜 <b>Правила «ОХОТЫ»</b>\n\n"
-        "Охота длится 60 минут. Игроки получают зацепки, расследуют дело, "
-        "взаимодействуют друг с другом и в конце могут сделать финальное обвинение.\n\n"
-        "Полная игровая механика будет добавлена следующим этапом.",
-        reply_markup=back()
+    if not user:
+        await callback.message.edit_text(
+            "❌ Сначала отправь /start.",
+            reply_markup=back_button()
+        )
+
+        await callback.answer()
+        return
+
+    best_place = user["best_place"] or "—"
+
+    text = (
+        "👤 <b>МОЙ ПРОФИЛЬ</b>\n\n"
+        f"🎫 Номер: <b>#{user['game_number']}</b>\n"
+        f"🕵️ Псевдоним: <b>{user['nickname']}</b>\n\n"
+        f"⭐ XP: <b>{user['xp']}</b>\n"
+        f"🏆 Победы: <b>{user['wins']}</b>\n"
+        f"🔎 Расследования: <b>{user['investigations']}</b>\n"
+        f"🤝 Взаимодействия: <b>{user['interactions']}</b>\n"
+        f"⚠️ Обвинения: <b>{user['accusations']}</b>\n"
+        f"🥇 Лучшее место: <b>{best_place}</b>"
     )
-    await c.answer()
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=back_button()
+    )
+
+    await callback.answer()
+
+
+# =========================
+# РЕЙТИНГ
+# =========================
 
 @dp.callback_query(F.data == "rating")
-async def rating(c: CallbackQuery):
+async def rating(callback: CallbackQuery):
     with closing(conn()) as db:
         rows = db.execute(
-            "SELECT nickname,xp FROM users ORDER BY xp DESC, game_number LIMIT 10"
+            """
+            SELECT nickname, xp, wins
+            FROM users
+            ORDER BY xp DESC, wins DESC, game_number ASC
+            LIMIT 10
+            """
         ).fetchall()
-    text = "🏆 <b>Рейтинг</b>\n\n"
-    text += "\n".join(f"{i}. {r['nickname']} — ⭐ {r['xp']} XP" for i,r in enumerate(rows,1)) or "Пока пусто."
-    await c.message.edit_text(text, reply_markup=back())
-    await c.answer()
+
+    if not rows:
+        text = "🏆 <b>РЕЙТИНГ</b>\n\nПока игроков нет."
+    else:
+        lines = []
+
+        for index, row in enumerate(rows, 1):
+            lines.append(
+                f"<b>{index}.</b> {row['nickname']} — "
+                f"⭐ {row['xp']} XP"
+            )
+
+        text = (
+            "🏆 <b>РЕЙТИНГ «ОХОТЫ»</b>\n\n"
+            + "\n".join(lines)
+        )
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=back_button()
+    )
+
+    await callback.answer()
+
+
+# =========================
+# ПРАВИЛА
+# =========================
+
+@dp.callback_query(F.data == "rules")
+async def rules(callback: CallbackQuery):
+    text = (
+        "📜 <b>ПРАВИЛА «ОХОТЫ»</b>\n\n"
+        "🎯 Каждая охота — отдельное расследование.\n\n"
+        "⏱ Игроки получают ограниченное время "
+        "на расследование дела.\n\n"
+        "🔎 Можно искать зацепки.\n"
+        "🤝 Можно взаимодействовать с другими игроками.\n"
+        "⚠️ В конце расследования можно сделать обвинение.\n\n"
+        "🏆 За результаты игрок получает XP и "
+        "поднимается в рейтинге.\n\n"
+        "Новые игровые механики будут добавляться "
+        "по мере развития проекта."
+    )
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=back_button()
+    )
+
+    await callback.answer()
+
+
+# =========================
+# ОХОТА
+# =========================
 
 @dp.callback_query(F.data == "hunt")
-async def hunt(c: CallbackQuery):
+async def hunt(callback: CallbackQuery):
     kb = InlineKeyboardBuilder()
-    kb.button(text="🎯 УЧАСТВОВАТЬ", callback_data="join")
-    kb.button(text="⬅️ Назад", callback_data="menu")
+
+    kb.button(
+        text="🎯 УЧАСТВОВАТЬ",
+        callback_data="join"
+    )
+
+    kb.button(
+        text="⬅️ Назад",
+        callback_data="menu"
+    )
+
     kb.adjust(1)
-    await c.message.edit_text(
-        "🕵️ <b>ОХОТА №001</b>\n"
-        "«Последний рейс»\n\n"
-        "⏱ 60 минут\n💰 Бесплатно\n🏆 Награды: XP и рейтинг\n\n"
-        "Охота пока находится в подготовке.",
+
+    text = (
+        "🕵️ <b>ОХОТА №001</b>\n\n"
+        "📖 <b>«Последний рейс»</b>\n\n"
+        "⏱ Продолжительность: <b>60 минут</b>\n"
+        "💰 Участие: <b>бесплатно</b>\n"
+        "🏆 Награда: <b>XP + рейтинг</b>\n\n"
+        "Охота находится в подготовке.\n"
+        "Нажми «УЧАСТВОВАТЬ», чтобы записаться."
+    )
+
+    await callback.message.edit_text(
+        text,
         reply_markup=kb.as_markup()
     )
-    await c.answer()
+
+    await callback.answer()
+
+
+# =========================
+# УЧАСТИЕ В ОХОТЕ
+# =========================
 
 @dp.callback_query(F.data == "join")
-async def join(c: CallbackQuery):
-    if not get_user(c.from_user.id):
-        await c.message.edit_text("Сначала зарегистрируйся через /start.", reply_markup=back())
-    else:
-        with closing(conn()) as db:
-            try:
-                db.execute("INSERT INTO registrations VALUES (?,?)", (c.from_user.id, "001"))
-                db.commit()
-                text = "✅ Ты зарегистрирован на ОХОТУ №001!"
-            except sqlite3.IntegrityError:
-                text = "ℹ️ Ты уже зарегистрирован на эту охоту."
-        await c.message.edit_text(text, reply_markup=back())
-    await c.answer()
+async def join_hunt(callback: CallbackQuery):
+    user = get_user(callback.from_user.id)
+
+    if not user:
+        await callback.message.edit_text(
+            "❌ Сначала зарегистрируйся через /start.",
+            reply_markup=back_button()
+        )
+
+        await callback.answer()
+        return
+
+    with closing(conn()) as db:
+        try:
+            db.execute(
+                """
+                INSERT INTO registrations
+                (telegram_id, hunt_code)
+                VALUES (?, ?)
+                """,
+                (callback.from_user.id, "001")
+            )
+
+            db.commit()
+
+            text = (
+                "✅ <b>Ты зарегистрирован!</b>\n\n"
+                "🎯 ОХОТА №001\n"
+                "📖 «Последний рейс»\n\n"
+                "Когда охота будет запущена, "
+                "ты сможешь принять участие."
+            )
+
+        except sqlite3.IntegrityError:
+            text = (
+                "ℹ️ <b>Ты уже зарегистрирован</b>\n\n"
+                "Ты уже записан на ОХОТУ №001."
+            )
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=back_button()
+    )
+
+    await callback.answer()
+
+
+# =========================
+# ЧАТ
+# =========================
 
 @dp.callback_query(F.data == "chat")
-async def chat(c: CallbackQuery):
+async def chat(callback: CallbackQuery):
     kb = InlineKeyboardBuilder()
-    kb.button(text="💬 Открыть чат", url="https://t.me/ohota_online_chat")
-    kb.button(text="⬅️ Назад", callback_data="menu")
+
+    kb.button(
+        text="💬 Открыть чат",
+        url="https://t.me/ohota_online_chat"
+    )
+
+    kb.button(
+        text="⬅️ Назад",
+        callback_data="menu"
+    )
+
     kb.adjust(1)
-    await c.message.edit_text("💬 Официальный чат «ОХОТЫ»", reply_markup=kb.as_markup())
-    await c.answer()
+
+    await callback.message.edit_text(
+        "💬 <b>Официальный чат «ОХОТЫ»</b>\n\n"
+        "Общайся с другими игроками.",
+        reply_markup=kb.as_markup()
+    )
+
+    await callback.answer()
+
+
+# =========================
+# ЗАПУСК
+# =========================
 
 async def main():
     init_db()
+
+    logging.info("Бот «ОХОТА» запускается...")
+
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
