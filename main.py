@@ -57,19 +57,25 @@ aio_limit = int(os.getenv("OHOTA_AIO_LIMIT", "100"))
 aio_keepalive = int(os.getenv("OHOTA_AIO_KEEPALIVE", "75"))
 aio_timeout_total = int(os.getenv("OHOTA_AIO_TIMEOUT", "60"))
 
-# Создаём aiohttp session с TCPConnector и таймаутом.
-# Это помогает уменьшить число разрывов (Connection reset by peer).
-connector = aiohttp.TCPConnector(limit=aio_limit, keepalive_timeout=aio_keepalive)
-timeout = aiohttp.ClientTimeout(total=aio_timeout_total)
-session = aiohttp.ClientSession(connector=connector, timeout=timeout)
+# Глобальные переменные для сессии и бота
+session = None
+bot = None
 
-bot = Bot(
-    token=BOT_TOKEN,
-    session=session,
-    default=DefaultBotProperties(
-        parse_mode=ParseMode.HTML
+async def init_bot():
+    """Инициализирует aiohttp сессию и бота внутри async контекста"""
+    global session, bot
+    
+    connector = aiohttp.TCPConnector(limit=aio_limit, keepalive_timeout=aio_keepalive)
+    timeout = aiohttp.ClientTimeout(total=aio_timeout_total)
+    session = aiohttp.ClientSession(connector=connector, timeout=timeout)
+    
+    bot = Bot(
+        token=BOT_TOKEN,
+        session=session,
+        default=DefaultBotProperties(
+            parse_mode=ParseMode.HTML
+        )
     )
-)
 
 dp = Dispatcher(
     storage=MemoryStorage()
@@ -408,3 +414,21 @@ STORY = [
 """
     },
 ]
+
+
+async def main():
+    """Главная функция для запуска бота"""
+    await init_bot()
+    init_db()
+    
+    # Здесь добавьте ваш остальной код инициализации
+    # например, регистрация обработчиков и запуск полинга
+    
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await session.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
