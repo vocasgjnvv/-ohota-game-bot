@@ -1,30 +1,43 @@
 import os
+import re
+import html
 import sqlite3
 import asyncio
 import logging
 from contextlib import closing
+from datetime import datetime
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, CallbackQuery
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    InputMediaPhoto,
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 
 # ============================================================
-# НАСТРОЙКИ
+# CONFIG
 # ============================================================
 
-TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-
-DB_PATH = os.getenv("DB_PATH", "ohota.db")
+TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
 
 if not TOKEN:
     raise RuntimeError(
-        "Не задан BOT_TOKEN. Добавь его в переменные окружения."
+        "Не задан BOT_TOKEN. Добавь BOT_TOKEN в переменные окружения."
     )
+
+try:
+    ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+except ValueError:
+    ADMIN_ID = 0
+
+DB_PATH = os.getenv("DB_PATH", "ohota.db")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -42,22 +55,23 @@ dp = Dispatcher()
 
 
 # ============================================================
-# БАЗА
+# DATABASE
 # ============================================================
 
-def conn():
+def db_connect():
     db = sqlite3.connect(DB_PATH)
     db.row_factory = sqlite3.Row
     return db
 
 
 def init_db():
-    with closing(conn()) as db:
+    with closing(db_connect()) as db:
+
         db.executescript("""
         CREATE TABLE IF NOT EXISTS users (
             telegram_id INTEGER PRIMARY KEY,
             game_number INTEGER UNIQUE NOT NULL,
-            nickname TEXT NOT NULL,
+            nickname TEXT UNIQUE NOT NULL,
             xp INTEGER DEFAULT 0,
             hp INTEGER DEFAULT 100,
             reputation INTEGER DEFAULT 50,
@@ -65,32 +79,104 @@ def init_db():
             investigations INTEGER DEFAULT 0,
             wins INTEGER DEFAULT 0,
             interactions INTEGER DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            successful_interactions INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS chapters (
+            id INTEGER PRIMARY KEY,
+            title TEXT NOT NULL,
+            story TEXT NOT NULL,
+            image_file_id TEXT,
+            active INTEGER DEFAULT 1
         );
 
         CREATE TABLE IF NOT EXISTS clues (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            telegram_id INTEGER NOT NULL,
-            clue_id TEXT NOT NULL,
-            UNIQUE(telegram_id, clue_id)
+            chapter_id INTEGER NOT NULL,
+            clue_key TEXT NOT NULL,
+            title TEXT NOT NULL,
+            text TEXT NOT NULL,
+            reward_xp INTEGER DEFAULT 15,
+            UNIQUE(chapter_id, clue_key)
         );
 
-        CREATE TABLE IF NOT EXISTS progress (
-            telegram_id INTEGER PRIMARY KEY,
-            chapter INTEGER DEFAULT 0,
-            solo INTEGER DEFAULT 1
+        CREATE TABLE IF NOT EXISTS found_clues (
+            telegram_id INTEGER NOT NULL,
+            clue_id INTEGER NOT NULL,
+            found_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(telegram_id, clue_id)
         );
 
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS rooms (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT UNIQUE NOT NULL,
+            user1 INTEGER NOT NULL,
+            user2 INTEGER NOT NULL,
+            status TEXT DEFAULT 'active',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS room_actions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            room_id INTEGER NOT NULL,
+            telegram_id INTEGER NOT NULL,
+            action TEXT NOT NULL,
+            result TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS answers (
+            telegram_id INTEGER NOT NULL,
+            chapter_id INTEGER NOT NULL,
+            answer_key TEXT NOT NULL,
+            correct INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(telegram_id, chapter_id)
+        );
         """)
+
+        # Default settings
+        db.execute("""
+            INSERT OR IGNORE INTO settings(key, value)
+            VALUES ('beta_active', '1')
+        """)
+
         db.commit()
 
 
+def get_setting(key, default=None):
+    with closing(db_connect()) as db:
+        row = db.execute(
+            "SELECT value FROM settings WHERE key=?",
+            (key,)
+        ).fetchone()
+
+        return row["value"] if row else default
+
+
+def set_setting(key, value):
+    with closing(db_connect()) as db:
+        db.execute("""
+            INSERT INTO settings(key, value)
+            VALUES (?, ?)
+            ON CONFLICT(key)
+            DO UPDATE SET value=excluded.value
+        """, (key, str(value)))
+        db.commit()
+
+
+def beta_active():
+    return get_setting("beta_active", "1") == "1"
+
+
 def get_user(user_id):
-    with closing(conn()) as db:
+    with closing(db_connect()) as db:
         return db.execute(
             "SELECT * FROM users WHERE telegram_id=?",
             (user_id,)
@@ -98,111 +184,117 @@ def get_user(user_id):
 
 
 def create_user(user_id, nickname):
-    with closing(conn()) as db:
+    with closing(db_connect()) as db:
+
         last = db.execute(
             "SELECT COALESCE(MAX(game_number), 1000) FROM users"
         ).fetchone()[0]
 
-        number = last + 1
+        game_number = last + 1
 
         db.execute("""
             INSERT INTO users
             (telegram_id, game_number, nickname)
             VALUES (?, ?, ?)
-        """, (user_id, number, nickname))
-
-        db.execute("""
-            INSERT INTO progress
-            (telegram_id, chapter, solo)
-            VALUES (?, 0, 1)
-        """, (user_id,))
+        """, (
+            user_id,
+            game_number,
+            nickname
+        ))
 
         db.commit()
 
-        return number
+        return game_number
 
 
-def change_stats(user_id, xp=0, hp=0, reputation=0):
-    with closing(conn()) as db:
+def update_user(user_id, **fields):
+    if not fields:
+        return
+
+    allowed = {
+        "xp",
+        "hp",
+        "reputation",
+        "chapter",
+        "investigations",
+        "wins",
+        "interactions",
+        "successful_interactions",
+        "nickname",
+    }
+
+    fields = {
+        key: value
+        for key, value in fields.items()
+        if key in allowed
+    }
+
+    if not fields:
+        return
+
+    assignments = ", ".join(
+        f"{key}=?" for key in fields
+    )
+
+    values = list(fields.values())
+    values.append(user_id)
+
+    with closing(db_connect()) as db:
+        db.execute(
+            f"UPDATE users SET {assignments} WHERE telegram_id=?",
+            values
+        )
+        db.commit()
+
+
+def change_stats(
+    user_id,
+    xp=0,
+    hp=0,
+    reputation=0,
+    interactions=0,
+    successful_interactions=0
+):
+    with closing(db_connect()) as db:
         db.execute("""
             UPDATE users
-            SET xp = MAX(0, xp + ?),
+            SET
+                xp = MAX(0, xp + ?),
                 hp = MAX(0, MIN(100, hp + ?)),
-                reputation = MAX(0, MIN(100, reputation + ?))
+                reputation = MAX(0, MIN(100, reputation + ?)),
+                interactions = interactions + ?,
+                successful_interactions =
+                    successful_interactions + ?
             WHERE telegram_id=?
-        """, (xp, hp, reputation, user_id))
-        db.commit()
-
-
-def set_chapter(user_id, chapter):
-    with closing(conn()) as db:
-        db.execute(
-            "UPDATE users SET chapter=? WHERE telegram_id=?",
-            (chapter, user_id)
-        )
-
-        db.execute(
-            """
-            INSERT INTO progress(telegram_id, chapter, solo)
-            VALUES (?, ?, 1)
-            ON CONFLICT(telegram_id)
-            DO UPDATE SET chapter=excluded.chapter
-            """,
-            (user_id, chapter)
-        )
+        """, (
+            xp,
+            hp,
+            reputation,
+            interactions,
+            successful_interactions,
+            user_id
+        ))
 
         db.commit()
 
 
-def add_clue(user_id, clue_id):
-    with closing(conn()) as db:
-        try:
-            db.execute(
-                "INSERT INTO clues(telegram_id, clue_id) VALUES (?, ?)",
-                (user_id, clue_id)
-            )
-            db.commit()
-            return True
-        except sqlite3.IntegrityError:
-            return False
-
-
-def has_clue(user_id, clue_id):
-    with closing(conn()) as db:
-        row = db.execute(
-            """
-            SELECT 1 FROM clues
-            WHERE telegram_id=? AND clue_id=?
-            """,
-            (user_id, clue_id)
-        ).fetchone()
-
-        return bool(row)
-
-
 # ============================================================
-# ИСТОРИЯ
+# STORY SEED
 # ============================================================
 
-STORY = {
+STORY_SEED = [
 
-    0: {
+    {
+        "id": 0,
         "title": "ПРОЛОГ — Последний рейс",
-
-        "text": """
-<b>ОХОТА: ПОСЛЕДНИЙ РЕЙС</b>
+        "story": """
+<b>ДЕЛО №417</b>
 
 23:47.
 
-Ночной поезд №417 должен был прибыть на конечную станцию
-через три минуты.
+Ночной поезд №417 исчез с радаров на участке длиной семь километров.
 
-Но он так и не приехал.
-
-Поезд исчез с радаров на участке длиной всего семь километров.
-
-Через двадцать минут диспетчер получил сообщение с телефона
-машиниста:
+Через двадцать минут диспетчер получил сообщение с телефона машиниста:
 
 <i>«Не ищите поезд. Ищите пассажира №17.»</i>
 
@@ -212,353 +304,245 @@ STORY = {
 
 Утром поезд нашли.
 
-Все пассажиры были внутри.
-
 Все двери были заперты изнутри.
 
 Машинист исчез.
 
-А на стекле последнего вагона кто-то написал:
+Пассажиры утверждали, что ничего не произошло.
+
+На стекле последнего вагона обнаружили надпись:
 
 <b>«ОДИН ИЗ ВАС УЖЕ ЗНАЕТ ПРАВДУ.»</b>
 
-Ты получаешь доступ к делу.
+Ты открываешь материалы дела.
 
-Но с этого момента расследование становится личным.
+На первой странице только одна строка:
+
+<b>«Если ты читаешь это — расследование уже началось.»</b>
 """,
-
-        "button": "🔎 ПРИСТУПИТЬ К РАССЛЕДОВАНИЮ"
+        "clues": []
     },
 
-    1: {
+    {
+        "id": 1,
         "title": "ГЛАВА 1 — Вагон №7",
-
-        "text": """
+        "story": """
 <b>ГЛАВА 1 — ВАГОН №7</b>
 
 Ты входишь в последний вагон.
 
 Внутри пахнет мокрым металлом и дешёвым табаком.
 
-Пассажиров двадцать.
+Девятнадцать пассажиров.
 
-Все утверждают, что ничего не видели.
-
-Но есть странность.
+Но в документах указано двадцать.
 
 На столике лежат часы.
 
 Они остановились ровно в <b>23:51</b>.
 
-На четыре минуты позже момента исчезновения поезда.
+Рядом лежит билет:
 
-Рядом лежит билет.
+<b>0417-17</b>.
 
-Номер:
+На обратной стороне:
 
-<b>0417-17</b>
+<i>«Не верь тому, кто первым скажет, что ничего не видел.»</i>
 
-На обратной стороне написано:
-
-<i>«Не верь человеку, который первым скажет, что ничего не видел.»</i>
-
-Ты осматриваешь вагон.
-
-Есть три вещи, которые могут оказаться важными.
+Ты начинаешь осмотр.
 """,
-
         "clues": [
-            (
-                "clue_clock",
-                "⌚ Осмотреть часы",
-                """
-Часы остановились в 23:51.
+            {
+                "key": "clock",
+                "title": "⌚ Осмотреть часы",
+                "text": """
+Часы исправны.
 
-Но механизм исправен.
+Кто-то остановил механизм вручную.
 
-Кто-то остановил их вручную.
+На задней крышке царапина в форме буквы:
 
-На задней крышке обнаружена маленькая царапина
-в форме буквы <b>R</b>.
+<b>R</b>.
 
-Получена улика:
+Это не случайная царапина.
 
-<b>«Остановленные часы»</b>
-"""
-            ),
-            (
-                "clue_ticket",
-                "🎫 Осмотреть билет",
-                """
+Кто-то хотел оставить знак.
+""",
+                "reward": 15
+            },
+            {
+                "key": "ticket",
+                "title": "🎫 Проверить билет",
+                "text": """
 Билет настоящий.
 
-Но номер 0417-17 отсутствует в системе.
+Но номер <b>0417-17</b> отсутствует в системе.
 
-Более того — билет был напечатан <b>после отправления поезда</b>.
+Страннее другое.
 
-Получена улика:
+Билет был напечатан уже после отправления поезда.
 
-<b>«Билет, которого не должно существовать»</b>
-"""
-            ),
-            (
-                "clue_window",
-                "🪟 Осмотреть окно",
-                """
-На внутренней стороне стекла обнаружены следы пальцев.
+Получается, кто-то печатал билет, когда поезд уже ехал.
+""",
+                "reward": 20
+            },
+            {
+                "key": "window",
+                "title": "🪟 Осмотреть окно",
+                "text": """
+На стекле следы пальцев.
 
-Следы принадлежат человеку, который сидел
-в этом месте до тебя.
+Под ними едва заметная надпись:
 
-Под ними видна короткая надпись:
+<b>R-17</b>.
 
-<b>R-17</b>
+Ты фотографируешь улику.
 
-Получена улика:
-
-<b>«След R-17»</b>
-"""
-            )
+Теперь у тебя есть первый настоящий след.
+""",
+                "reward": 20
+            }
         ]
     },
 
-    2: {
+    {
+        "id": 2,
         "title": "ГЛАВА 2 — Пассажир №17",
-
-        "text": """
+        "story": """
 <b>ГЛАВА 2 — ПАССАЖИР №17</b>
 
-Ты проверяешь список пассажиров.
+Камеры показывают человека в капюшоне.
 
-№15 — женщина.
+Он сидит на месте №17.
 
-№16 — мужчина.
+Но никто не видел, как он вошёл.
 
-№18 — подросток.
+Ты проверяешь записи ещё раз.
 
-№19 — пожилой человек.
+В 23:39 вагон пуст.
 
-№17 отсутствует.
+В 23:41 появляется пассажир.
 
-Но камеры показывают другое.
+В 23:42 камера на несколько секунд теряет сигнал.
 
-За две минуты до исчезновения поезда
-в вагон вошёл человек.
+После этого пассажир уже сидит на месте №17.
 
-Он сел на место №17.
-
-Лица камеры не видят.
-
-Человек был в капюшоне.
-
-Ты находишь его отражение в окне.
-
-На руке — часы.
-
-Такие же, как у машиниста.
-
-Значит, пассажир №17 мог быть связан
-с исчезновением машиниста.
-
-Но возникает новая проблема.
-
-Один из пассажиров врёт.
+Кто-то вмешался в систему наблюдения.
 """,
-
         "clues": [
-            (
-                "clue_passenger",
-                "👤 Проверить пассажиров",
-                """
-Пассажир №16 утверждает:
+            {
+                "key": "camera",
+                "title": "📹 Изучить камеры",
+                "text": """
+Пассажир не входил через дверь.
 
-<i>«Я всю дорогу спал.»</i>
+На записи отсутствуют четыре секунды.
 
-Но его телефон показывает,
-что в 23:49 он отправил сообщение
-на номер без имени.
+Именно четыре секунды были вырезаны вручную.
 
-Текст:
+Это была не поломка.
+""",
+                "reward": 20
+            },
+            {
+                "key": "phone",
+                "title": "📱 Проверить телефон №16",
+                "text": """
+Пассажир №16 утверждает, что спал.
+
+Но в 23:49 он отправил сообщение:
 
 <b>«Он здесь.»</b>
-"""
-            ),
-            (
-                "clue_camera",
-                "📹 Изучить запись камеры",
-                """
-На записи видно, что пассажир №17
-не входил через дверь.
 
-Он уже находился в вагоне.
+Получатель удалён.
+""",
+                "reward": 25
+            },
+            {
+                "key": "watch",
+                "title": "⌚ Сравнить часы",
+                "text": """
+На часах неизвестного пассажира такая же гравировка:
 
-Это означает, что он мог попасть туда
-ещё до отправления.
+<b>R-17</b>.
 
-Получена улика:
-
-<b>«Пассажир, которого не видели»</b>
-"""
-            ),
-            (
-                "clue_watch",
-                "⌚ Сравнить часы",
-                """
-Часы пассажира №17 и часы машиниста
-имеют одинаковую гравировку:
-
-<b>R-17</b>
-
-Это уже не случайность.
-
-Кто-то заранее подготовил эту связь.
-"""
-            )
+Теперь связь с машинистом выглядит очевидной.
+""",
+                "reward": 25
+            }
         ]
     },
 
-    3: {
-        "title": "ГЛАВА 3 — Ложь",
+    {
+        "id": 3,
+        "title": "ГЛАВА 3 — Четыре секунды",
+        "story": """
+<b>ГЛАВА 3 — ЧЕТЫРЕ СЕКУНДЫ</b>
 
-        "text": """
-<b>ГЛАВА 3 — ЛОЖЬ</b>
+Ты восстанавливаешь повреждённую запись.
 
-Ты понимаешь главное.
+На четвёртой секунде появляется рука.
 
-Дело не в исчезнувшем поезде.
+Человек передаёт кому-то маленький металлический контейнер.
 
-Кто-то хотел, чтобы двадцать пассажиров
-оказались вместе.
+Контейнер исчезает из кадра.
 
-У каждого из них есть причина что-то скрывать.
+Через несколько секунд поезд теряет связь.
 
-Ты получаешь доступ к записям телефонов.
+У тебя появляется первая версия:
 
-В 23:52 каждый телефон получил
-одно и то же уведомление.
-
-Но у одного человека уведомления нет.
-
-Именно у пассажира №16.
-
-Ты проверяешь его снова.
-
-Теперь он говорит:
-
-<i>«Я вообще не знаю, о чём вы.»</i>
-
-Но на его руке появляется свежий порез.
-
-В кармане находится бумажка:
-
-<b>«Если он спросит про R-17 — скажи, что не знаешь.»</b>
-
-Внизу подпись:
-
-<b>М.</b>
+кто-то передал устройство, которое отключило поезд от системы.
 """,
-
         "clues": [
-            (
-                "clue_message",
-                "📱 Проверить сообщение",
-                """
-Сообщение отправлено с телефона,
-который официально принадлежит машинисту.
+            {
+                "key": "container",
+                "title": "📦 Исследовать контейнер",
+                "text": """
+По форме контейнер похож на старый блок доступа.
 
-Но телефон найден у пассажира №16.
+Такие использовались на железной дороге двадцать лет назад.
 
-Получена улика:
+На нём:
 
-<b>«Телефон машиниста»</b>
-"""
-            ),
-            (
-                "clue_note",
-                "📄 Изучить записку",
-                """
-Буква «М» написана тем же человеком,
-который написал R-17 на окне.
+<b>R-17 / ARCHIVE</b>.
+""",
+                "reward": 25
+            },
+            {
+                "key": "archive",
+                "title": "🗄 Проверить архив",
+                "text": """
+В архиве найдено старое дело №417.
 
-Это означает:
+Дата:
 
-<b>автор записки был внутри вагона.</b>
-"""
-            ),
-            (
-                "clue_seat",
-                "💺 Осмотреть место №17",
-                """
-Под сиденьем обнаружена металлическая пластина.
+<b>17 лет назад.</b>
 
-На ней выгравировано:
+Оно закрыто без объяснения причин.
+""",
+                "reward": 25
+            },
+            {
+                "key": "signature",
+                "title": "✍️ Сравнить подписи",
+                "text": """
+Подпись в старом деле совпадает
+с подписью нынешнего начальника станции.
 
-<b>17 / 20</b>
-
-И ниже:
-
-<i>«Когда останется один — открой дверь.»</i>
-"""
-            )
+Но начальник утверждает, что впервые видит материалы.
+""",
+                "reward": 30
+            }
         ]
     },
 
-    4: {
-        "title": "ГЛАВА 4 — Двадцатый",
+    {
+        "id": 4,
+        "title": "ГЛАВА 4 — Архив",
+        "story": """
+<b>ГЛАВА 4 — АРХИВ</b>
 
-        "text": """
-<b>ГЛАВА 4 — ДВАДЦАТЫЙ</b>
-
-Ты пересчитываешь пассажиров.
-
-Раз.
-
-Два.
-
-Три.
-
-...
-
-Девятнадцать.
-
-Ты останавливаешься.
-
-Потом понимаешь.
-
-Пассажиров не двадцать.
-
-Их было <b>девятнадцать</b> с самого начала.
-
-Но камеры показывали двадцать человек.
-
-Кто-то был двадцатым.
-
-Кто-то, кого система не считала пассажиром.
-
-Ты возвращаешься к записи камеры.
-
-Останавливаешь её на последнем кадре.
-
-Теперь ты видишь лицо.
-
-И узнаёшь его.
-
-Это человек, который должен был расследовать это дело
-до тебя.
-
-Он исчез <b>три месяца назад</b>.
-
-На экране появляется новое сообщение:
-
-<b>«ТЕПЕРЬ ТЫ ПОНЯЛ, ПОЧЕМУ ВЫБРАЛИ ИМЕННО ТЕБЯ.»</b>
-""",
-
-        "clues": [
-            (
-                "clue_twentieth",
-                "🔎 Найти двадцатого",
-                """
-В документах обнаруживается фотография.
+Ты находишь старую фотографию.
 
 На ней двадцать человек.
 
@@ -566,609 +550,807 @@ STORY = {
 
 И один следователь.
 
-Следователь — ты.
+Следователь на фотографии — человек,
+который исчез три месяца назад.
 
-Фотография сделана <b>три месяца назад</b>.
+На обороте:
 
-Хотя ты никогда не был в этом месте.
-"""
-            ),
-            (
-                "clue_archive",
-                "🗄 Проверить архив",
-                """
-В архиве есть дело с таким же номером:
+<b>«Следующее расследование проведёт он.»</b>
 
-<b>417</b>.
+Ты переворачиваешь фотографию.
 
-Дата открытия:
+На второй стороне написано твоё имя.
+""",
+        "clues": [
+            {
+                "key": "photo",
+                "title": "📸 Изучить фотографию",
+                "text": """
+Фотография сделана три месяца назад.
 
-три месяца назад.
+Но ты никогда не был на этой станции.
 
-Статус:
+Кто-то заранее знал, что ты окажешься здесь.
+""",
+                "reward": 30
+            },
+            {
+                "key": "file",
+                "title": "📁 Открыть дело №417",
+                "text": """
+Дело состоит из двадцати разделов.
 
-<b>НЕ ЗАКРЫТО.</b>
-"""
-            )
+Девятнадцать уже закрыты.
+
+Двадцатый подписан:
+
+<b>«ОТКРЫТЬ ПОСЛЕ ПОЯВЛЕНИЯ НАБЛЮДАТЕЛЯ.»</b>
+""",
+                "reward": 30
+            }
         ]
     },
 
-    5: {
-        "title": "ФИНАЛ — Продолжение следует",
+    {
+        "id": 5,
+        "title": "ГЛАВА 5 — Наблюдатель",
+        "story": """
+<b>ГЛАВА 5 — НАБЛЮДАТЕЛЬ</b>
 
-        "text": """
+Ты понимаешь:
+
+пассажиры не случайные люди.
+
+Каждый из них связан с делом №417.
+
+Но никто не знает всей картины.
+
+Каждому дали только один фрагмент.
+
+И теперь фрагменты находятся у двадцати разных людей.
+""",
+        "clues": [
+            {
+                "key": "list",
+                "title": "📋 Проверить список",
+                "text": """
+У каждого пассажира свой код.
+
+01 — свидетель.
+
+07 — архив.
+
+11 — деньги.
+
+14 — доступ.
+
+17 — неизвестен.
+
+20 — наблюдатель.
+
+Последняя строка принадлежит тебе.
+""",
+                "reward": 30
+            },
+            {
+                "key": "mark",
+                "title": "🔐 Проверить свой код",
+                "text": """
+Твой код:
+
+<b>20</b>.
+
+Рядом написано:
+
+<i>«Наблюдатель становится участником,
+когда делает первый выбор.»</i>
+""",
+                "reward": 35
+            }
+        ]
+    },
+
+    {
+        "id": 6,
+        "title": "ГЛАВА 6 — Свидетель",
+        "story": """
+<b>ГЛАВА 6 — СВИДЕТЕЛЬ</b>
+
+Один пассажир просит поговорить с тобой.
+
+Он говорит, что видел машиниста.
+
+Но его история противоречит камерам.
+
+Он либо врёт,
+
+либо камеры подделаны.
+""",
+        "clues": [
+            {
+                "key": "witness",
+                "title": "👁 Допросить свидетеля",
+                "text": """
+Свидетель утверждает:
+
+машинист вышел из кабины самостоятельно.
+
+Но на полу кабины найдена кровь.
+
+Следов борьбы нет.
+""",
+                "reward": 35
+            },
+            {
+                "key": "blood",
+                "title": "🩸 Проверить кровь",
+                "text": """
+Кровь принадлежит не машинисту.
+
+Она принадлежит пассажиру №17.
+""",
+                "reward": 40
+            }
+        ]
+    },
+
+    {
+        "id": 7,
+        "title": "ГЛАВА 7 — Сбой",
+        "story": """
+<b>ГЛАВА 7 — СБОЙ</b>
+
+В 00:13 поезд снова исчезает с системы.
+
+На этот раз всего на семь секунд.
+
+Кто-то внутри всё ещё имеет доступ.
+
+Ты находишь терминал.
+
+На экране один активный пользователь:
+
+<b>R17</b>.
+""",
+        "clues": [
+            {
+                "key": "terminal",
+                "title": "💻 Проверить терминал",
+                "text": """
+Последний вход выполнен не снаружи.
+
+Он выполнен из вагона №7.
+""",
+                "reward": 35
+            },
+            {
+                "key": "login",
+                "title": "🔑 Проверить время входа",
+                "text": """
+Вход выполнен за 30 секунд
+до исчезновения поезда.
+
+Пользователь находился рядом с тобой.
+""",
+                "reward": 40
+            }
+        ]
+    },
+
+    {
+        "id": 8,
+        "title": "ГЛАВА 8 — Ложный след",
+        "story": """
+<b>ГЛАВА 8 — ЛОЖНЫЙ СЛЕД</b>
+
+Все улики указывают на пассажира №16.
+
+Слишком идеально.
+
+Настолько идеально, что это начинает выглядеть подозрительно.
+
+Кто-то хочет, чтобы ты обвинил именно его.
+""",
+        "clues": [
+            {
+                "key": "false",
+                "title": "🧩 Проверить ложную улику",
+                "text": """
+Отпечаток на контейнере принадлежит №16.
+
+Но контейнер был найден после того,
+как он покинул вагон.
+
+Кто-то подложил отпечаток.
+""",
+                "reward": 40
+            }
+        ]
+    },
+
+    {
+        "id": 9,
+        "title": "ГЛАВА 9 — Двадцатый",
+        "story": """
+<b>ГЛАВА 9 — ДВАДЦАТЫЙ</b>
+
+Ты снова пересчитываешь пассажиров.
+
+И понимаешь:
+
+их действительно двадцать.
+
+Но один из них не существует в официальной системе.
+
+Это и есть пассажир №17.
+""",
+        "clues": [
+            {
+                "key": "identity",
+                "title": "🪪 Установить личность №17",
+                "text": """
+Документов нет.
+
+Имя отсутствует.
+
+Но система распознавания лица выдаёт:
+
+<b>НЕИЗВЕСТНО</b>.
+
+Затем через секунду меняет результат:
+
+<b>СОВПАДЕНИЕ: 98%</b>.
+
+С кем?
+
+С тобой.
+""",
+                "reward": 50
+            }
+        ]
+    },
+
+    {
+        "id": 10,
+        "title": "ГЛАВА 10 — Двойник",
+        "story": """
+<b>ГЛАВА 10 — ДВОЙНИК</b>
+
+Ты смотришь запись снова.
+
+Пассажир №17 похож на тебя.
+
+Но это невозможно.
+
+Или возможно?
+
+В архиве появляется фотография.
+
+На ней ты.
+
+Рядом человек, которого ты никогда не встречал.
+""",
+        "clues": [
+            {
+                "key": "double",
+                "title": "🪞 Сравнить лица",
+                "text": """
+Система считает совпадение почти идеальным.
+
+Разница только в одном:
+
+шраме на лице.
+
+У человека на фотографии его нет.
+""",
+                "reward": 50
+            }
+        ]
+    },
+
+    {
+        "id": 11,
+        "title": "ГЛАВА 11 — Человек без имени",
+        "story": """
+<b>ГЛАВА 11 — ЧЕЛОВЕК БЕЗ ИМЕНИ</b>
+
+Ты находишь запись разговора.
+
+Голос говорит:
+
+<i>«Он должен вспомнить сам.»</i>
+
+Второй голос:
+
+<i>«А если не вспомнит?»</i>
+
+Ответ:
+
+<i>«Тогда поезд уйдёт снова.»</i>
+""",
+        "clues": [
+            {
+                "key": "voice",
+                "title": "🎙 Анализировать голос",
+                "text": """
+Один голос принадлежит начальнику станции.
+
+Второй невозможно идентифицировать.
+
+Но спектр голоса совпадает с твоим на 91%.
+""",
+                "reward": 50
+            }
+        ]
+    },
+
+    {
+        "id": 12,
+        "title": "ГЛАВА 12 — Второй поезд",
+        "story": """
+<b>ГЛАВА 12 — ВТОРОЙ ПОЕЗД</b>
+
+В архиве обнаруживается второй поезд №417.
+
+Он существовал семнадцать лет назад.
+
+Его пассажиры исчезли.
+
+Официальная версия — авария.
+
+Но аварии не было.
+""",
+        "clues": [
+            {
+                "key": "oldtrain",
+                "title": "🚆 Проверить старый поезд",
+                "text": """
+Поезд остановился на том же километре.
+
+В ту же минуту.
+
+23:47.
+""",
+                "reward": 55
+            }
+        ]
+    },
+
+    {
+        "id": 13,
+        "title": "ГЛАВА 13 — Повторение",
+        "story": """
+<b>ГЛАВА 13 — ПОВТОРЕНИЕ</b>
+
+История повторяется.
+
+Те же часы.
+
+Тот же вагон.
+
+Тот же номер.
+
+Только теперь ты знаешь, что произойдёт.
+
+И у тебя остаётся меньше часа.
+""",
+        "clues": [
+            {
+                "key": "cycle",
+                "title": "⏱ Сопоставить события",
+                "text": """
+События происходят с точностью до минуты.
+
+Кто-то заранее написал сценарий.
+""",
+                "reward": 55
+            }
+        ]
+    },
+
+    {
+        "id": 14,
+        "title": "ГЛАВА 14 — Предательство",
+        "story": """
+<b>ГЛАВА 14 — ПРЕДАТЕЛЬСТВО</b>
+
+Игрок, которому ты доверял, передаёт тебе улику.
+
+Она настоящая.
+
+Но часть информации удалена.
+
+Кто-то не хочет, чтобы ты узнал имя.
+""",
+        "clues": [
+            {
+                "key": "betrayal",
+                "title": "🤝 Проверить союзника",
+                "text": """
+Твой союзник получил приказ:
+
+не говорить тебе имя пассажира №17.
+
+Но он нарушил приказ.
+
+Теперь он тоже становится целью.
+""",
+                "reward": 60
+            }
+        ]
+    },
+
+    {
+        "id": 15,
+        "title": "ГЛАВА 15 — Имя",
+        "story": """
+<b>ГЛАВА 15 — ИМЯ</b>
+
+Ты наконец находишь имя.
+
+Но это имя принадлежит тебе.
+
+В старом деле ты указан как участник.
+
+Дата рождения совпадает.
+
+Документы настоящие.
+
+Ты ничего не помнишь.
+""",
+        "clues": [
+            {
+                "key": "name",
+                "title": "📄 Проверить документы",
+                "text": """
+Все документы настоящие.
+
+Но один файл изменён вчера.
+
+Кто-то следит за расследованием прямо сейчас.
+""",
+                "reward": 60
+            }
+        ]
+    },
+
+    {
+        "id": 16,
+        "title": "ГЛАВА 16 — Память",
+        "story": """
+<b>ГЛАВА 16 — ПАМЯТЬ</b>
+
+Ты вспоминаешь фрагмент.
+
+Ты уже был здесь.
+
+Три месяца назад.
+
+И ты сам оставил запись:
+
+<i>«Если я забуду — не доверяй мне.»</i>
+""",
+        "clues": [
+            {
+                "key": "memory",
+                "title": "🧠 Восстановить память",
+                "text": """
+Ты вспомнил человека.
+
+Пассажир №17 не враг.
+
+Он пытался остановить эксперимент.
+""",
+                "reward": 65
+            }
+        ]
+    },
+
+    {
+        "id": 17,
+        "title": "ГЛАВА 17 — Эксперимент",
+        "story": """
+<b>ГЛАВА 17 — ЭКСПЕРИМЕНТ</b>
+
+Поезд был не транспортом.
+
+Он был экспериментом.
+
+Двадцать человек.
+
+Двадцать ролей.
+
+Один наблюдатель.
+
+И один человек, который должен был сломать систему.
+""",
+        "clues": [
+            {
+                "key": "experiment",
+                "title": "🧪 Найти цель эксперимента",
+                "text": """
+Цель эксперимента:
+
+выяснить, насколько далеко человек готов зайти,
+если ему дать неполную правду.
+""",
+                "reward": 70
+            }
+        ]
+    },
+
+    {
+        "id": 18,
+        "title": "ГЛАВА 18 — Выбор",
+        "story": """
+<b>ГЛАВА 18 — ВЫБОР</b>
+
+У тебя два варианта.
+
+Открыть дверь и выпустить пассажиров.
+
+Или продолжить расследование,
+оставив их внутри.
+
+Любой выбор имеет последствия.
+""",
+        "clues": [
+            {
+                "key": "choice",
+                "title": "🚪 Проверить дверь",
+                "text": """
+На двери код.
+
+Он состоит из всех найденных тобой номеров.
+
+Но одного номера не хватает:
+
+<b>17</b>.
+
+Значит, последний код должен дать пассажир №17.
+""",
+                "reward": 75
+            }
+        ]
+    },
+
+    {
+        "id": 19,
+        "title": "ФИНАЛ — Продолжение следует",
+        "story": """
 <b>ФИНАЛ ПЕРВОЙ ЧАСТИ</b>
 
-Ты собрал все основные улики.
+Ты вводишь код.
 
-Но ответов стало не больше.
+Дверь открывается.
 
-Наоборот.
+Но за дверью нет станции.
 
-Теперь ты знаешь:
+Там коридор.
 
-— кто-то контролировал поезд;
+Длинный.
 
-— пассажир №17 существовал;
+Тёмный.
 
-— машинист исчез не случайно;
+На стене двадцать фотографий.
 
-— дело №417 началось задолго до сегодняшней ночи;
+Девятнадцать пассажиров.
 
-— а твоё имя появилось в материалах расследования
-ещё три месяца назад.
+И одна твоя.
 
-Ты открываешь последний файл.
+Под фотографией надпись:
 
-В нём только одна строка:
+<b>«НАБЛЮДАТЕЛЬ ЗАВЕРШИЛ ТЕСТ.»</b>
 
-<b>«НЕ ИЩИ ПАССАЖИРА №17.»</b>
+Ты переворачиваешь фотографию.
 
-Пауза.
+На обратной стороне:
 
-Следующая строка появляется сама:
+<i>«Теперь начинается настоящий эксперимент.»</i>
 
-<b>«ОН ИЩЕТ ТЕБЯ.»</b>
+Телефон вибрирует.
 
-Экран гаснет.
-
-Через несколько секунд приходит сообщение.
+Новое сообщение.
 
 Отправитель:
 
 <b>ПАССАЖИР №17</b>
 
-Текст:
+<i>«Ты наконец вспомнил меня.»</i>
 
-<i>«Если хочешь узнать, кто ты на самом деле,
-найди меня до следующего рейса.»</i>
+Пауза.
+
+<i>«Теперь вспомни, кем был ты.»</i>
 
 ━━━━━━━━━━━━━━
 
 <b>ПРОДОЛЖЕНИЕ СЛЕДУЕТ...</b>
-"""
+""",
+        "clues": []
     }
-}
+]
 
 
-# ============================================================
-# КЛАВИАТУРЫ
-# ============================================================
+def seed_story():
+    with closing(db_connect()) as db:
 
-def start_keyboard():
-    kb = InlineKeyboardBuilder()
-
-    kb.button(
-        text="🔎 НАЧАТЬ",
-        callback_data="story"
-    )
-
-    return kb.as_markup()
-
-
-def main_menu():
-    kb = InlineKeyboardBuilder()
-
-    kb.button(text="🔎 Продолжить расследование", callback_data="story")
-    kb.button(text="👤 Мой профиль", callback_data="profile")
-    kb.button(text="🏆 Рейтинг", callback_data="rating")
-    kb.button(text="📜 Правила", callback_data="rules")
-    kb.button(text="💬 Чат", callback_data="chat")
-
-    kb.adjust(1)
-
-    return kb.as_markup()
-
-
-def back_menu():
-    kb = InlineKeyboardBuilder()
-    kb.button(text="⬅️ Главное меню", callback_data="menu")
-    return kb.as_markup()
-
-
-# ============================================================
-# START
-# ============================================================
-
-@dp.message(CommandStart())
-async def start(message: Message):
-
-    user = get_user(message.from_user.id)
-
-    if not user:
-        await message.answer(
-            """
-<b>🕵️ ОХОТА</b>
-
-Добро пожаловать.
-
-Это не обычная игра с загадками.
-
-Здесь ты расследуешь дело, собираешь улики,
-принимаешь решения и решаешь, кому доверять.
-
-Каждое действие может изменить ход расследования.
-
-<b>Готов начать?</b>
-""",
-            reply_markup=start_keyboard()
-        )
-
-        return
-
-    await message.answer(
-        f"""
-<b>🕵️ С возвращением, {user['nickname']}.</b>
-
-Дело №417 всё ещё не закрыто.
-
-Текущий прогресс:
-📖 Глава: <b>{user['chapter']}</b>
-⭐ XP: <b>{user['xp']}</b>
-❤️ HP: <b>{user['hp']}</b>
-🤝 Репутация: <b>{user['reputation']}</b>
-
-<b>Продолжить расследование?</b>
-""",
-        reply_markup=main_menu()
-    )
-
-
-# ============================================================
-# НАЧАЛО ИСТОРИИ
-# ============================================================
-
-@dp.callback_query(F.data == "story")
-async def story(callback: CallbackQuery):
-
-    user = get_user(callback.from_user.id)
-
-    if not user:
-        await callback.answer(
-            "Сначала отправь /start.",
-            show_alert=True
-        )
-        return
-
-    chapter = user["chapter"]
-
-    if chapter > 5:
-        chapter = 5
-
-    data = STORY[chapter]
-
-    kb = InlineKeyboardBuilder()
-
-    if chapter == 0:
-        kb.button(
-            text="🔎 Приступить к расследованию",
-            callback_data="chapter_1"
-        )
-    elif chapter == 5:
-        kb.button(
-            text="⬅️ В меню",
-            callback_data="menu"
-        )
-    else:
-        kb.button(
-            text="▶️ Продолжить",
-            callback_data=f"chapter_{chapter}"
-        )
-
-    kb.adjust(1)
-
-    await callback.message.edit_text(
-        data["text"],
-        reply_markup=kb.as_markup()
-    )
-
-    await callback.answer()
-
-
-# ============================================================
-# ГЛАВЫ
-# ============================================================
-
-async def show_chapter(callback: CallbackQuery, chapter: int):
-
-    user = get_user(callback.from_user.id)
-
-    if not user:
-        await callback.answer(
-            "Сначала зарегистрируйся.",
-            show_alert=True
-        )
-        return
-
-    set_chapter(callback.from_user.id, chapter)
-
-    data = STORY[chapter]
-
-    kb = InlineKeyboardBuilder()
-
-    if "clues" in data:
-
-        for clue_id, title, text in data["clues"]:
-            kb.button(
-                text=title,
-                callback_data=f"clue:{chapter}:{clue_id}"
-            )
-
-        kb.adjust(1)
-
-        kb.button(
-            text="▶️ Завершить главу",
-            callback_data=f"finish:{chapter}"
-        )
-
-    else:
-        kb.button(
-            text="⬅️ Главное меню",
-            callback_data="menu"
-        )
-
-    await callback.message.edit_text(
-        data["text"],
-        reply_markup=kb.as_markup()
-    )
-
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("chapter_"))
-async def chapter_callback(callback: CallbackQuery):
-
-    chapter = int(callback.data.split("_")[1])
-
-    await show_chapter(callback, chapter)
-
-
-# ============================================================
-# УЛИКИ
-# ============================================================
-
-@dp.callback_query(F.data.startswith("clue:"))
-async def clue_callback(callback: CallbackQuery):
-
-    _, chapter, clue_id = callback.data.split(":")
-
-    chapter = int(chapter)
-
-    data = STORY[chapter]
-
-    selected = None
-
-    for cid, title, text in data.get("clues", []):
-        if cid == clue_id:
-            selected = (cid, title, text)
-            break
-
-    if not selected:
-        await callback.answer(
-            "Улика не найдена.",
-            show_alert=True
-        )
-        return
-
-    _, title, text = selected
-
-    first_time = add_clue(
-        callback.from_user.id,
-        clue_id
-    )
-
-    if first_time:
-        change_stats(
-            callback.from_user.id,
-            xp=15
-        )
-
-    kb = InlineKeyboardBuilder()
-
-    kb.button(
-        text="⬅️ К уликам",
-        callback_data=f"chapter_{chapter}"
-    )
-
-    await callback.message.edit_text(
-        f"""
-<b>{title}</b>
-
-{text}
-
-{"⭐ +15 XP" if first_time else "Улика уже найдена."}
-""",
-        reply_markup=kb.as_markup()
-    )
-
-    await callback.answer()
-
-
-# ============================================================
-# ЗАВЕРШЕНИЕ ГЛАВЫ
-# ============================================================
-
-@dp.callback_query(F.data.startswith("finish:"))
-async def finish_chapter(callback: CallbackQuery):
-
-    chapter = int(callback.data.split(":")[1])
-
-    user = get_user(callback.from_user.id)
-
-    if chapter >= 4:
-
-        set_chapter(callback.from_user.id, 5)
-
-        change_stats(
-            callback.from_user.id,
-            xp=100
-        )
-
-        with closing(conn()) as db:
-            db.execute("""
-                UPDATE users
-                SET investigations=investigations+1,
-                    wins=wins+1
-                WHERE telegram_id=?
-            """, (callback.from_user.id,))
-            db.commit()
-
-        await callback.message.edit_text(
-            STORY[5]["text"],
-            reply_markup=back_menu()
-        )
-
-        await callback.answer(
-            "Расследование завершено."
-        )
-
-        return
-
-    next_chapter = chapter + 1
-
-    set_chapter(
-        callback.from_user.id,
-        next_chapter
-    )
-
-    change_stats(
-        callback.from_user.id,
-        xp=50
-    )
-
-    kb = InlineKeyboardBuilder()
-
-    kb.button(
-        text=f"▶️ ГЛАВА {next_chapter}",
-        callback_data=f"chapter_{next_chapter}"
-    )
-
-    await callback.message.edit_text(
-        f"""
-<b>ГЛАВА {chapter} ЗАВЕРШЕНА</b>
-
-⭐ Ты получил <b>+50 XP</b>.
-
-Но расследование только начинается.
-
-Следующая часть дела уже ждёт тебя.
-""",
-        reply_markup=kb.as_markup()
-    )
-
-    await callback.answer()
-
-
-# ============================================================
-# ПРОФИЛЬ
-# ============================================================
-
-@dp.callback_query(F.data == "profile")
-async def profile(callback: CallbackQuery):
-
-    user = get_user(callback.from_user.id)
-
-    if not user:
-        await callback.answer(
-            "Сначала зарегистрируйся.",
-            show_alert=True
-        )
-        return
-
-    with closing(conn()) as db:
-        clues = db.execute(
-            "SELECT COUNT(*) FROM clues WHERE telegram_id=?",
-            (callback.from_user.id,)
+        count = db.execute(
+            "SELECT COUNT(*) FROM chapters"
         ).fetchone()[0]
 
-    await callback.message.edit_text(
-        f"""
-<b>👤 МОЁ ДОСЬЕ</b>
+        if count > 0:
+            return
 
-🎫 Игровой номер: <b>#{user['game_number']}</b>
-🕵️ Псевдоним: <b>{user['nickname']}</b>
+        for chapter in STORY_SEED:
 
-━━━━━━━━━━━━━━
+            db.execute("""
+                INSERT INTO chapters
+                (id, title, story, image_file_id, active)
+                VALUES (?, ?, ?, NULL, 1)
+            """, (
+                chapter["id"],
+                chapter["title"],
+                chapter["story"]
+            ))
 
-📖 Глава: <b>{user['chapter']}</b>
-⭐ XP: <b>{user['xp']}</b>
-❤️ HP: <b>{user['hp']}</b>
-🤝 Репутация: <b>{user['reputation']}</b>
+            for clue in chapter.get("clues", []):
 
-🔎 Найдено улик: <b>{clues}</b>
-🏆 Расследований: <b>{user['investigations']}</b>
-🥇 Побед: <b>{user['wins']}</b>
-🤝 Взаимодействий: <b>{user['interactions']}</b>
-""",
-        reply_markup=back_menu()
-    )
+                db.execute("""
+                    INSERT INTO clues
+                    (chapter_id, clue_key, title, text, reward_xp)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (
+                    chapter["id"],
+                    clue["key"],
+                    clue["title"],
+                    clue["text"],
+                    clue.get("reward", 15)
+                ))
 
-    await callback.answer()
-
-
-# ============================================================
-# РЕЙТИНГ
-# ============================================================
-
-@dp.callback_query(F.data == "rating")
-async def rating(callback: CallbackQuery):
-
-    with closing(conn()) as db:
-        rows = db.execute("""
-            SELECT nickname, xp, reputation
-            FROM users
-            ORDER BY xp DESC, reputation DESC
-            LIMIT 10
-        """).fetchall()
-
-    if not rows:
-        text = "🏆 Пока игроков нет."
-    else:
-
-        lines = []
-
-        for i, row in enumerate(rows, 1):
-            lines.append(
-                f"<b>{i}.</b> {row['nickname']} — "
-                f"⭐ {row['xp']} XP"
-            )
-
-        text = (
-            "<b>🏆 РЕЙТИНГ ОХОТНИКОВ</b>\n\n"
-            + "\n".join(lines)
-        )
-
-    await callback.message.edit_text(
-        text,
-        reply_markup=back_menu()
-    )
-
-    await callback.answer()
+        db.commit()
 
 
-# ============================================================
-# ПРАВИЛА
-# ============================================================
+def get_chapter(chapter_id):
+    with closing(db_connect()) as db:
+        return db.execute(
+            "SELECT * FROM chapters WHERE id=?",
+            (chapter_id,)
+        ).fetchone()
 
-@dp.callback_query(F.data == "rules")
-async def rules(callback: CallbackQuery):
 
-    await callback.message.edit_text(
-        """
-<b>📜 ПРАВИЛА «ОХОТЫ»</b>
+def get_clues(chapter_id):
+    with closing(db_connect()) as db:
+        return db.execute("""
+            SELECT *
+            FROM clues
+            WHERE chapter_id=?
+            ORDER BY id
+        """, (chapter_id,)).fetchall()
 
-🔎 Собирай улики.
 
-🧠 Анализируй информацию.
+def get_clue(clue_id):
+    with closing(db_connect()) as db:
+        return db.execute(
+            "SELECT * FROM clues WHERE id=?",
+            (clue_id,)
+        ).fetchone()
 
-🤝 В следующих версиях расследований
-можно будет взаимодействовать с другими
-игроками.
 
-🎭 Можно будет доверять игроку или
-попытаться его обмануть.
+def has_found_clue(user_id, clue_id):
+    with closing(db_connect()) as db:
+        row = db.execute("""
+            SELECT 1
+            FROM found_clues
+            WHERE telegram_id=? AND clue_id=?
+        """, (
+            user_id,
+            clue_id
+        )).fetchone()
 
-⭐ За успешные действия начисляется XP.
+        return bool(row)
 
-❤️ Ошибки могут уменьшать HP.
 
-🤝 Репутация показывает, насколько другим
-игрокам можно тебе доверять.
+def mark_clue_found(user_id, clue_id):
+    with closing(db_connect()) as db:
+        try:
+            db.execute("""
+                INSERT INTO found_clues
+                (telegram_id, clue_id)
+                VALUES (?, ?)
+            """, (
+                user_id,
+                clue_id
+            ))
 
-🏆 Чем лучше расследование — тем выше
-позиция в рейтинге.
+            db.commit()
+            return True
 
-<b>Главное правило:</b>
+        except sqlite3.IntegrityError:
+            return False
 
-Не доверяй никому полностью.
-""",
-        reply_markup=back_menu()
-    )
 
-    await callback.answer()
+def found_clue_count(user_id):
+    with closing(db_connect()) as db:
+        return db.execute("""
+            SELECT COUNT(*)
+            FROM found_clues
+            WHERE telegram_id=?
+        """, (user_id,)).fetchone()[0]
 
 
 # ============================================================
-# ЧАТ
+# FSM
 # ============================================================
 
-@dp.callback_query(F.data == "chat")
-async def chat(callback: CallbackQuery):
+class RegistrationState(StatesGroup):
+    nickname = State()
 
+
+class AdminState(StatesGroup):
+    edit_title = State()
+    edit_story = State()
+    create_title = State()
+    create_story = State()
+    add_clue_title = State()
+    add_clue_text = State()
+    image = State()
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+def admin_only(user_id):
+    return ADMIN_ID != 0 and user_id == ADMIN_ID
+
+
+def safe(text):
+    return html.escape(str(text))
+
+
+def main_keyboard():
     kb = InlineKeyboardBuilder()
 
     kb.button(
-        text="💬 Открыть чат",
-        url="https://t.me/ohota_online_chat"
+        text="🔎 НАЧАТЬ ОХОТУ",
+        callback_data="game"
     )
+
+    kb.button(
+        text="👤 Моё досье",
+        callback_data="profile"
+    )
+
+    kb.button(
+        text="🏆 Рейтинг",
+        callback_data="rating"
+    )
+
+    kb.button(
+        text="📜 Как играть",
+        callback_data="rules"
+    )
+
+    kb.button(
+        text="💬 Поддержка",
+        callback_data="support"
+    )
+
+    kb.adjust(1)
+
+    return kb.as_markup()
+
+
+def back_keyboard():
+    kb = InlineKeyboardBuilder()
 
     kb.button(
         text="⬅️ Назад",
         callback_data="menu"
     )
 
-    kb.adjust(1)
+    return kb.as_markup()
 
-    await callback.message.edit_text(
-        """
-<b>💬 СООБЩЕСТВО «ОХОТЫ»</b>
-
-Здесь игроки смогут обсуждать расследования,
-но настоящие улики лучше не раскрывать.
-
-Скоро появится отдельная система
-взаимодействия между игроками.
-""",
-        reply_markup=kb.as_markup()
-    )
-
-    await callback.answer()
-
-
-# ============================================================
-# ГЛАВНОЕ МЕНЮ
-# ============================================================
-
-@dp.callback_query(F.data == "menu")
-async def menu_callback(callback: CallbackQuery):
-
-    await callback.message.edit_text(
-        """
-<b>🕵️ ОХОТА</b>
-
-<b>Дело №417 всё ещё открыто.</b>
-
-Выбери действие:
-""",
-        reply_markup=main_menu()
-    )
-
-    await callback.answer()
-
-
-# ============================================================
-# АДМИНКА
-# ============================================================
 
 def admin_keyboard():
     kb = InlineKeyboardBuilder()
@@ -1176,6 +1358,11 @@ def admin_keyboard():
     kb.button(
         text="🎯 Управление охотой",
         callback_data="admin_hunt"
+    )
+
+    kb.button(
+        text="📖 История",
+        callback_data="admin_story"
     )
 
     kb.button(
@@ -1189,12 +1376,12 @@ def admin_keyboard():
     )
 
     kb.button(
-        text="📝 История",
-        callback_data="admin_story"
+        text="⚙️ Настройки",
+        callback_data="admin_settings"
     )
 
     kb.button(
-        text="⬅️ Выйти",
+        text="⬅️ Закрыть",
         callback_data="menu"
     )
 
@@ -1203,73 +1390,693 @@ def admin_keyboard():
     return kb.as_markup()
 
 
-def is_admin(user_id):
-    return user_id == ADMIN_ID and ADMIN_ID != 0
+# ============================================================
+# START
+# ============================================================
 
+@dp.message(CommandStart())
+async def command_start(message: Message, state: FSMContext):
+
+    await state.clear()
+
+    user = get_user(message.from_user.id)
+
+    if user:
+        await message.answer(
+            f"""
+<b>🕵️ ОХОТА</b>
+
+С возвращением, <b>{safe(user['nickname'])}</b>.
+
+Дело №417 всё ещё открыто.
+
+📖 Глава: <b>{user['chapter'] + 1}/20</b>
+⭐ XP: <b>{user['xp']}</b>
+❤️ HP: <b>{user['hp']}</b>
+🤝 Репутация: <b>{user['reputation']}</b>
+
+<b>Продолжим?</b>
+""",
+            reply_markup=main_keyboard()
+        )
+
+        return
+
+    await message.answer(
+        """
+<b>🕵️ ОХОТА</b>
+
+<i>Онлайн-детективная игра.</i>
+
+Здесь нет готовых ответов.
+
+Ты собираешь улики, принимаешь решения,
+анализируешь людей и пытаешься понять,
+кто говорит правду.
+
+<b>Дело №417 уже ждёт тебя.</b>
+""",
+        reply_markup=main_keyboard()
+    )
+
+
+# ============================================================
+# MAIN MENU
+# ============================================================
+
+@dp.callback_query(F.data == "menu")
+async def menu(callback: CallbackQuery, state: FSMContext):
+
+    await state.clear()
+
+    await callback.message.edit_text(
+        """
+<b>🕵️ ОХОТА</b>
+
+<b>Дело №417 всё ещё открыто.</b>
+
+Выбери действие.
+""",
+        reply_markup=main_keyboard()
+    )
+
+    await callback.answer()
+
+
+# ============================================================
+# GAME START
+# ============================================================
+
+@dp.callback_query(F.data == "game")
+async def game_start(callback: CallbackQuery, state: FSMContext):
+
+    user = get_user(callback.from_user.id)
+
+    if not user:
+
+        await state.set_state(
+            RegistrationState.nickname
+        )
+
+        await callback.message.edit_text(
+            """
+<b>🕵️ ДОПУСК К РАССЛЕДОВАНИЮ</b>
+
+Перед началом придумай себе
+игровой псевдоним.
+
+<b>3–20 символов.</b>
+
+Можно использовать:
+буквы, цифры, пробел, <code>_</code> и <code>-</code>.
+
+Напиши псевдоним следующим сообщением.
+""",
+            reply_markup=None
+        )
+
+        await callback.answer()
+        return
+
+    if not beta_active() and not admin_only(callback.from_user.id):
+
+        await callback.message.edit_text(
+            """
+<b>⏳ БЕТА ПОКА ЗАКРЫТА</b>
+
+Сейчас проводится техническая подготовка.
+
+Следи за обновлениями.
+""",
+            reply_markup=back_keyboard()
+        )
+
+        await callback.answer()
+        return
+
+    await show_current_chapter(
+        callback.message,
+        callback.from_user.id
+    )
+
+    await callback.answer()
+
+
+# ============================================================
+# REGISTRATION
+# ============================================================
+
+@dp.message(RegistrationState.nickname)
+async def registration(message: Message, state: FSMContext):
+
+    nickname = message.text.strip()
+
+    if not re.fullmatch(
+        r"[A-Za-zА-Яа-яЁё0-9 _-]{3,20}",
+        nickname
+    ):
+        await message.answer(
+            "❌ Псевдоним должен быть от 3 до 20 символов.\n\n"
+            "Попробуй ещё раз."
+        )
+        return
+
+    bad_words = (
+        "хуй",
+        "пизд",
+        "еба",
+        "бляд",
+        "бля",
+        "сука",
+        "дебил",
+        "мудак",
+    )
+
+    normalized = nickname.lower().replace("ё", "е")
+
+    if any(word in normalized for word in bad_words):
+
+        await message.answer(
+            "❌ Такой псевдоним использовать нельзя.\n\n"
+            "Придумай другой."
+        )
+
+        return
+
+    try:
+
+        number = create_user(
+            message.from_user.id,
+            nickname
+        )
+
+    except sqlite3.IntegrityError:
+
+        await message.answer(
+            "❌ Этот псевдоним уже занят.\n\n"
+            "Придумай другой."
+        )
+
+        return
+
+    await state.clear()
+
+    await message.answer(
+        f"""
+<b>🟢 ДОПУСК ПОЛУЧЕН</b>
+
+🎫 Игровой номер: <b>#{number}</b>
+👤 Псевдоним: <b>{safe(nickname)}</b>
+
+Теперь назад дороги нет.
+
+<b>Дело №417 начинается.</b>
+""",
+        reply_markup=InlineKeyboardBuilder()
+        .button(
+            text="🔎 ОТКРЫТЬ ДЕЛО",
+            callback_data="game"
+        )
+        .as_markup()
+    )
+
+
+# ============================================================
+# SHOW CHAPTER
+# ============================================================
+
+async def show_current_chapter(message, user_id):
+
+    user = get_user(user_id)
+
+    if not user:
+        return
+
+    chapter_id = user["chapter"]
+
+    chapter = get_chapter(chapter_id)
+
+    if not chapter:
+        return
+
+    text = chapter["story"]
+
+    kb = InlineKeyboardBuilder()
+
+    if chapter["image_file_id"]:
+        try:
+            await message.answer_photo(
+                chapter["image_file_id"],
+                caption=text
+            )
+        except Exception:
+            await message.answer(text)
+
+    else:
+        await message.answer(text)
+
+    clues = get_clues(chapter_id)
+
+    if clues:
+
+        for clue in clues:
+
+            already = has_found_clue(
+                user_id,
+                clue["id"]
+            )
+
+            prefix = "✅" if already else "🔎"
+
+            kb.button(
+                text=f"{prefix} {clue['title']}",
+                callback_data=f"clue:{clue['id']}"
+            )
+
+        kb.button(
+            text="▶️ Завершить этап",
+            callback_data=f"finish:{chapter_id}"
+        )
+
+    elif chapter_id < 19:
+
+        kb.button(
+            text="▶️ Продолжить",
+            callback_data=f"finish:{chapter_id}"
+        )
+
+    else:
+
+        kb.button(
+            text="🏠 В главное меню",
+            callback_data="menu"
+        )
+
+    kb.adjust(1)
+
+    await message.answer(
+        "<b>Твои действия:</b>",
+        reply_markup=kb.as_markup()
+    )
+
+
+# ============================================================
+# CLUE
+# ============================================================
+
+@dp.callback_query(F.data.startswith("clue:"))
+async def clue(callback: CallbackQuery):
+
+    clue_id = int(
+        callback.data.split(":")[1]
+    )
+
+    user = get_user(callback.from_user.id)
+
+    if not user:
+        await callback.answer(
+            "Сначала нажми НАЧАТЬ ОХОТУ.",
+            show_alert=True
+        )
+        return
+
+    clue_data = get_clue(clue_id)
+
+    if not clue_data:
+        await callback.answer(
+            "Улика не найдена.",
+            show_alert=True
+        )
+        return
+
+    first = mark_clue_found(
+        callback.from_user.id,
+        clue_id
+    )
+
+    reward = clue_data["reward_xp"]
+
+    if first:
+        change_stats(
+            callback.from_user.id,
+            xp=reward
+        )
+
+        reward_text = f"\n\n⭐ <b>+{reward} XP</b>"
+    else:
+        reward_text = "\n\n<i>Ты уже изучал эту улику.</i>"
+
+    kb = InlineKeyboardBuilder()
+
+    kb.button(
+        text="⬅️ Вернуться к расследованию",
+        callback_data="game"
+    )
+
+    await callback.message.edit_text(
+        f"""
+<b>{clue_data['title']}</b>
+
+{clue_data['text']}
+{reward_text}
+""",
+        reply_markup=kb.as_markup()
+    )
+
+    await callback.answer()
+
+
+# ============================================================
+# FINISH CHAPTER
+# ============================================================
+
+@dp.callback_query(F.data.startswith("finish:"))
+async def finish_chapter(callback: CallbackQuery):
+
+    chapter_id = int(
+        callback.data.split(":")[1]
+    )
+
+    user = get_user(callback.from_user.id)
+
+    if not user:
+        await callback.answer(
+            "Сначала зарегистрируйся.",
+            show_alert=True
+        )
+        return
+
+    if user["chapter"] != chapter_id:
+        await callback.answer(
+            "Этот этап уже завершён или ещё недоступен.",
+            show_alert=True
+        )
+        return
+
+    if chapter_id >= 19:
+
+        update_user(
+            callback.from_user.id,
+            chapter=19,
+            investigations=user["investigations"] + 1,
+            wins=user["wins"] + 1,
+            xp=user["xp"] + 100
+        )
+
+        await callback.message.edit_text(
+            """
+<b>🏆 ПЕРВАЯ ЧАСТЬ ЗАВЕРШЕНА</b>
+
+Ты прошёл дело №417.
+
+⭐ <b>+100 XP</b>
+
+Но теперь начинается самое интересное.
+
+Ты узнал правду о поезде.
+
+Но не узнал правду о себе.
+
+━━━━━━━━━━━━━━
+
+<b>ПРОДОЛЖЕНИЕ СЛЕДУЕТ...</b>
+""",
+            reply_markup=back_keyboard()
+        )
+
+        await callback.answer(
+            "Расследование завершено."
+        )
+
+        return
+
+    next_chapter = chapter_id + 1
+
+    update_user(
+        callback.from_user.id,
+        chapter=next_chapter,
+        xp=user["xp"] + 35
+    )
+
+    chapter = get_chapter(next_chapter)
+
+    kb = InlineKeyboardBuilder()
+
+    kb.button(
+        text=f"▶️ {chapter['title']}",
+        callback_data="game"
+    )
+
+    await callback.message.edit_text(
+        f"""
+<b>ЭТАП ЗАВЕРШЁН</b>
+
+⭐ <b>+35 XP</b>
+
+Новая информация открыта.
+
+<b>{chapter['title']}</b>
+""",
+        reply_markup=kb.as_markup()
+    )
+
+    await callback.answer()
+
+
+# ============================================================
+# PROFILE
+# ============================================================
+
+@dp.callback_query(F.data == "profile")
+async def profile(callback: CallbackQuery):
+
+    user = get_user(callback.from_user.id)
+
+    if not user:
+
+        await callback.message.edit_text(
+            """
+<b>👤 МОЁ ДОСЬЕ</b>
+
+Ты ещё не зарегистрирован.
+
+Нажми «НАЧАТЬ ОХОТУ».
+""",
+            reply_markup=main_keyboard()
+        )
+
+        await callback.answer()
+        return
+
+    clues = found_clue_count(
+        callback.from_user.id
+    )
+
+    await callback.message.edit_text(
+        f"""
+<b>👤 МОЁ ДОСЬЕ</b>
+
+🎫 №<b>{user['game_number']}</b>
+🕵️ <b>{safe(user['nickname'])}</b>
+
+━━━━━━━━━━━━━━
+
+📖 Этап: <b>{user['chapter'] + 1}/20</b>
+
+⭐ XP: <b>{user['xp']}</b>
+❤️ HP: <b>{user['hp']}/100</b>
+🤝 Репутация: <b>{user['reputation']}/100</b>
+
+🔎 Найдено улик: <b>{clues}</b>
+
+🏆 Побед: <b>{user['wins']}</b>
+🎯 Расследований: <b>{user['investigations']}</b>
+
+🤝 Взаимодействий: <b>{user['interactions']}</b>
+""",
+        reply_markup=back_keyboard()
+    )
+
+    await callback.answer()
+
+
+# ============================================================
+# RATING
+# ============================================================
+
+@dp.callback_query(F.data == "rating")
+async def rating(callback: CallbackQuery):
+
+    with closing(db_connect()) as db:
+
+        rows = db.execute("""
+            SELECT nickname, xp, reputation
+            FROM users
+            ORDER BY xp DESC, reputation DESC
+            LIMIT 20
+        """).fetchall()
+
+    if not rows:
+
+        text = """
+<b>🏆 РЕЙТИНГ</b>
+
+Пока игроков нет.
+"""
+
+    else:
+
+        lines = []
+
+        for index, row in enumerate(rows, 1):
+
+            lines.append(
+                f"<b>{index}.</b> "
+                f"{safe(row['nickname'])} "
+                f"— ⭐ {row['xp']}"
+            )
+
+        text = (
+            "<b>🏆 РЕЙТИНГ ОХОТНИКОВ</b>\n\n"
+            + "\n".join(lines)
+        )
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=back_keyboard()
+    )
+
+    await callback.answer()
+
+
+# ============================================================
+# RULES
+# ============================================================
+
+@dp.callback_query(F.data == "rules")
+async def rules(callback: CallbackQuery):
+
+    await callback.message.edit_text(
+        """
+<b>📜 КАК ИГРАТЬ</b>
+
+🔎 Исследуй дело.
+
+🧩 Собирай улики.
+
+🧠 Сопоставляй информацию.
+
+❤️ Ошибки могут стоить HP.
+
+⭐ За найденные улики получаешь XP.
+
+🤝 Позже можно будет взаимодействовать
+с другими охотниками.
+
+🎭 Можно доверять.
+
+🎭 Можно обманывать.
+
+🏆 Репутация показывает, насколько
+тебе доверяют другие игроки.
+
+<b>Главное:</b>
+
+Не всякая улика говорит правду.
+
+И не каждый человек говорит правду.
+""",
+        reply_markup=back_keyboard()
+    )
+
+    await callback.answer()
+
+
+# ============================================================
+# SUPPORT
+# ============================================================
+
+@dp.callback_query(F.data == "support")
+async def support(callback: CallbackQuery):
+
+    await callback.message.edit_text(
+        """
+<b>💬 ПОДДЕРЖКА</b>
+
+Нашёл ошибку?
+
+Напиши администратору проекта.
+
+Если ты проходишь бета-тест,
+обязательно укажи:
+
+• номер этапа;
+• что нажал;
+• что произошло;
+• что ожидал увидеть.
+
+Так мы быстрее исправим проблему.
+""",
+        reply_markup=back_keyboard()
+    )
+
+    await callback.answer()
+
+
+# ============================================================
+# ADMIN
+# ============================================================
 
 @dp.message(Command("admin"))
-async def admin(message: Message):
+async def admin_command(message: Message):
 
-    if not is_admin(message.from_user.id):
+    if not admin_only(message.from_user.id):
+
         await message.answer(
             "⛔ Доступ запрещён."
         )
+
         return
 
     await message.answer(
         """
 <b>🔐 МОЁ ПРОСТРАНСТВО</b>
 
-Добро пожаловать, администратор.
+Только для администратора.
 
-Здесь находится управление «ОХОТОЙ».
-
-Ты можешь управлять историей,
-игроками и статистикой.
+Здесь ты управляешь всей игрой.
 """,
         reply_markup=admin_keyboard()
     )
 
 
 # ============================================================
-# АДМИН — ОХОТА
+# ADMIN HUNT
 # ============================================================
 
 @dp.callback_query(F.data == "admin_hunt")
 async def admin_hunt(callback: CallbackQuery):
 
-    if not is_admin(callback.from_user.id):
-        await callback.answer(
-            "Доступ запрещён.",
-            show_alert=True
-        )
+    if not admin_only(callback.from_user.id):
         return
+
+    status = "🟢 ЗАПУЩЕНА" if beta_active() else "🔴 ОСТАНОВЛЕНА"
 
     kb = InlineKeyboardBuilder()
 
     kb.button(
-        text="▶️ Запустить тест",
-        callback_data="admin_start"
+        text="▶️ Запустить бета-тест",
+        callback_data="beta_on"
     )
 
     kb.button(
         text="⏹ Остановить",
-        callback_data="admin_stop"
+        callback_data="beta_off"
     )
 
     kb.button(
-        text="✏️ Редактирование",
-        callback_data="admin_edit"
-    )
-
-    kb.button(
-        text="➕ Создание главы",
-        callback_data="admin_create"
-    )
-
-    kb.button(
-        text="🖼 Добавить картинку",
-        callback_data="admin_image"
+        text="📖 Управление главами",
+        callback_data="admin_story"
     )
 
     kb.button(
@@ -1280,21 +2087,15 @@ async def admin_hunt(callback: CallbackQuery):
     kb.adjust(1)
 
     await callback.message.edit_text(
-        """
+        f"""
 <b>🎯 УПРАВЛЕНИЕ ОХОТОЙ</b>
 
-Здесь будут основные действия с расследованием.
+Статус бета-теста:
 
-▶️ Запустить — открыть тестовую охоту.
+<b>{status}</b>
 
-⏹ Остановить — остановить тест.
-
-✏️ Редактирование — изменить содержание.
-
-➕ Создание главы — добавить новую главу.
-
-🖼 Добавить картинку — прикрепить изображение
-к выбранной главе.
+Здесь ты можешь открыть или закрыть
+игру для обычных игроков.
 """,
         reply_markup=kb.as_markup()
     )
@@ -1302,80 +2103,65 @@ async def admin_hunt(callback: CallbackQuery):
     await callback.answer()
 
 
-@dp.callback_query(F.data == "admin")
-async def admin_back(callback: CallbackQuery):
+@dp.callback_query(F.data == "beta_on")
+async def beta_on(callback: CallbackQuery):
 
-    if not is_admin(callback.from_user.id):
+    if not admin_only(callback.from_user.id):
         return
 
-    await callback.message.edit_text(
-        "<b>🔐 МОЁ ПРОСТРАНСТВО</b>\n\nВыбери раздел:",
-        reply_markup=admin_keyboard()
+    set_setting("beta_active", "1")
+
+    await callback.answer(
+        "🟢 Бета-тест запущен.",
+        show_alert=True
     )
 
-    await callback.answer()
 
+@dp.callback_query(F.data == "beta_off")
+async def beta_off(callback: CallbackQuery):
 
-# ============================================================
-# АДМИН — СТАТИСТИКА
-# ============================================================
-
-@dp.callback_query(F.data == "admin_stats")
-async def admin_stats(callback: CallbackQuery):
-
-    if not is_admin(callback.from_user.id):
+    if not admin_only(callback.from_user.id):
         return
 
-    with closing(conn()) as db:
+    set_setting("beta_active", "0")
 
-        users = db.execute(
-            "SELECT COUNT(*) FROM users"
-        ).fetchone()[0]
-
-        clues = db.execute(
-            "SELECT COUNT(*) FROM clues"
-        ).fetchone()[0]
-
-        avg_xp = db.execute(
-            "SELECT COALESCE(AVG(xp),0) FROM users"
-        ).fetchone()[0]
-
-    await callback.message.edit_text(
-        f"""
-<b>📊 СТАТИСТИКА «ОХОТЫ»</b>
-
-👥 Игроков: <b>{users}</b>
-🔎 Найдено улик: <b>{clues}</b>
-⭐ Средний XP: <b>{avg_xp:.1f}</b>
-
-🎯 Активная история:
-
-<b>«Последний рейс»</b>
-""",
-        reply_markup=back_menu()
+    await callback.answer(
+        "🔴 Бета-тест остановлен.",
+        show_alert=True
     )
-
-    await callback.answer()
 
 
 # ============================================================
-# АДМИН — ИСТОРИЯ
+# ADMIN STORY
 # ============================================================
 
 @dp.callback_query(F.data == "admin_story")
 async def admin_story(callback: CallbackQuery):
 
-    if not is_admin(callback.from_user.id):
+    if not admin_only(callback.from_user.id):
         return
+
+    with closing(db_connect()) as db:
+
+        chapters = db.execute("""
+            SELECT id, title
+            FROM chapters
+            ORDER BY id
+        """).fetchall()
 
     kb = InlineKeyboardBuilder()
 
-    for chapter, data in STORY.items():
+    for chapter in chapters:
 
         kb.button(
-            text=f"📖 {data['title']}",
-            callback_data=f"admin_chapter:{chapter}"
+            text=f"📖 {chapter['id'] + 1}. {chapter['title']}",
+            callback_data=f"admin_chapter:{chapter['id']}"
         )
+
+    kb.button(
+        text="➕ Создать главу",
+        callback_data="admin_create"
+    )
 
     kb.button(
         text="⬅️ Назад",
@@ -1386,13 +2172,16 @@ async def admin_story(callback: CallbackQuery):
 
     await callback.message.edit_text(
         """
-<b>📝 РЕДАКТОР ИСТОРИИ</b>
+<b>📖 РЕДАКТОР ИСТОРИИ</b>
 
 Выбери главу.
 
-В дальнейшем здесь можно будет
-редактировать текст, задания, улики
-и изображения без изменения основного кода.
+Здесь можно:
+
+✏️ изменить текст;
+🖼 добавить изображение;
+🔎 добавить улику;
+➕ создать новую главу.
 """,
         reply_markup=kb.as_markup()
     )
@@ -1400,65 +2189,529 @@ async def admin_story(callback: CallbackQuery):
     await callback.answer()
 
 
+# ============================================================
+# ADMIN CHAPTER
+# ============================================================
+
 @dp.callback_query(F.data.startswith("admin_chapter:"))
 async def admin_chapter(callback: CallbackQuery):
 
-    if not is_admin(callback.from_user.id):
+    if not admin_only(callback.from_user.id):
         return
 
-    chapter = int(callback.data.split(":")[1])
+    chapter_id = int(
+        callback.data.split(":")[1]
+    )
 
-    data = STORY[chapter]
+    chapter = get_chapter(chapter_id)
+    clues = get_clues(chapter_id)
+
+    kb = InlineKeyboardBuilder()
+
+    kb.button(
+        text="✏️ Изменить название",
+        callback_data=f"edit_title:{chapter_id}"
+    )
+
+    kb.button(
+        text="📝 Изменить сюжет",
+        callback_data=f"edit_story:{chapter_id}"
+    )
+
+    kb.button(
+        text="🖼 Добавить картинку",
+        callback_data=f"add_image:{chapter_id}"
+    )
+
+    kb.button(
+        text="🔎 Добавить улику",
+        callback_data=f"add_clue:{chapter_id}"
+    )
+
+    kb.button(
+        text="⬅️ Назад",
+        callback_data="admin_story"
+    )
+
+    kb.adjust(1)
 
     await callback.message.edit_text(
         f"""
-<b>{data['title']}</b>
+<b>📖 {chapter['title']}</b>
 
-Улик в главе:
-<b>{len(data.get('clues', []))}</b>
+Улик: <b>{len(clues)}</b>
 
-Сейчас содержание истории находится
-в коде.
+Изображение:
+<b>{"есть" if chapter["image_file_id"] else "нет"}</b>
 
-Следующий этап — вынести редактор полностью
-в базу данных, чтобы ты мог менять главы
-прямо из Telegram.
+━━━━━━━━━━━━━━
+
+{chapter["story"][:700]}
 """,
-        reply_markup=back_menu()
+        reply_markup=kb.as_markup()
     )
 
     await callback.answer()
 
 
 # ============================================================
-# АДМИН — ИГРОКИ
+# EDIT TITLE
+# ============================================================
+
+@dp.callback_query(F.data.startswith("edit_title:"))
+async def edit_title_start(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+
+    if not admin_only(callback.from_user.id):
+        return
+
+    chapter_id = int(
+        callback.data.split(":")[1]
+    )
+
+    await state.update_data(
+        chapter_id=chapter_id
+    )
+
+    await state.set_state(
+        AdminState.edit_title
+    )
+
+    await callback.message.answer(
+        "✏️ Напиши новое название главы."
+    )
+
+    await callback.answer()
+
+
+@dp.message(AdminState.edit_title)
+async def edit_title_finish(
+    message: Message,
+    state: FSMContext
+):
+
+    if not admin_only(message.from_user.id):
+        return
+
+    data = await state.get_data()
+    chapter_id = data["chapter_id"]
+
+    with closing(db_connect()) as db:
+
+        db.execute(
+            "UPDATE chapters SET title=? WHERE id=?",
+            (
+                message.text.strip(),
+                chapter_id
+            )
+        )
+
+        db.commit()
+
+    await state.clear()
+
+    await message.answer(
+        "✅ Название главы изменено."
+    )
+
+    await message.answer(
+        "🔐 Моё пространство",
+        reply_markup=admin_keyboard()
+    )
+
+
+# ============================================================
+# EDIT STORY
+# ============================================================
+
+@dp.callback_query(F.data.startswith("edit_story:"))
+async def edit_story_start(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+
+    if not admin_only(callback.from_user.id):
+        return
+
+    chapter_id = int(
+        callback.data.split(":")[1]
+    )
+
+    await state.update_data(
+        chapter_id=chapter_id
+    )
+
+    await state.set_state(
+        AdminState.edit_story
+    )
+
+    await callback.message.answer(
+        """
+📝 <b>Изменение сюжета</b>
+
+Отправь новый текст главы.
+
+HTML-разметка Telegram разрешена.
+"""
+    )
+
+    await callback.answer()
+
+
+@dp.message(AdminState.edit_story)
+async def edit_story_finish(
+    message: Message,
+    state: FSMContext
+):
+
+    if not admin_only(message.from_user.id):
+        return
+
+    data = await state.get_data()
+
+    with closing(db_connect()) as db:
+
+        db.execute(
+            "UPDATE chapters SET story=? WHERE id=?",
+            (
+                message.text,
+                data["chapter_id"]
+            )
+        )
+
+        db.commit()
+
+    await state.clear()
+
+    await message.answer(
+        "✅ Сюжет главы сохранён.",
+        reply_markup=admin_keyboard()
+    )
+
+
+# ============================================================
+# ADD IMAGE
+# ============================================================
+
+@dp.callback_query(F.data.startswith("add_image:"))
+async def add_image_start(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+
+    if not admin_only(callback.from_user.id):
+        return
+
+    chapter_id = int(
+        callback.data.split(":")[1]
+    )
+
+    await state.update_data(
+        chapter_id=chapter_id
+    )
+
+    await state.set_state(
+        AdminState.image
+    )
+
+    await callback.message.answer(
+        """
+🖼 <b>Добавление изображения</b>
+
+Отправь фотографию следующим сообщением.
+
+Она будет показываться сверху текста выбранной главы.
+"""
+    )
+
+    await callback.answer()
+
+
+@dp.message(AdminState.image, F.photo)
+async def add_image_finish(
+    message: Message,
+    state: FSMContext
+):
+
+    if not admin_only(message.from_user.id):
+        return
+
+    data = await state.get_data()
+
+    file_id = message.photo[-1].file_id
+
+    with closing(db_connect()) as db:
+
+        db.execute(
+            """
+            UPDATE chapters
+            SET image_file_id=?
+            WHERE id=?
+            """,
+            (
+                file_id,
+                data["chapter_id"]
+            )
+        )
+
+        db.commit()
+
+    await state.clear()
+
+    await message.answer(
+        "✅ Изображение главы сохранено.",
+        reply_markup=admin_keyboard()
+    )
+
+
+@dp.message(AdminState.image)
+async def image_wrong(message: Message):
+
+    await message.answer(
+        "❌ Нужно отправить именно фотографию."
+    )
+
+
+# ============================================================
+# CREATE CHAPTER
+# ============================================================
+
+@dp.callback_query(F.data == "admin_create")
+async def create_chapter_start(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+
+    if not admin_only(callback.from_user.id):
+        return
+
+    await state.set_state(
+        AdminState.create_title
+    )
+
+    await callback.message.answer(
+        """
+➕ <b>Создание новой главы</b>
+
+Сначала напиши название.
+"""
+    )
+
+    await callback.answer()
+
+
+@dp.message(AdminState.create_title)
+async def create_title_finish(
+    message: Message,
+    state: FSMContext
+):
+
+    if not admin_only(message.from_user.id):
+        return
+
+    await state.update_data(
+        title=message.text.strip()
+    )
+
+    await state.set_state(
+        AdminState.create_story
+    )
+
+    await message.answer(
+        """
+📝 Теперь отправь текст новой главы.
+"""
+    )
+
+
+@dp.message(AdminState.create_story)
+async def create_story_finish(
+    message: Message,
+    state: FSMContext
+):
+
+    if not admin_only(message.from_user.id):
+        return
+
+    data = await state.get_data()
+
+    with closing(db_connect()) as db:
+
+        max_id = db.execute(
+            "SELECT COALESCE(MAX(id), -1) FROM chapters"
+        ).fetchone()[0]
+
+        new_id = max_id + 1
+
+        db.execute("""
+            INSERT INTO chapters
+            (id, title, story, active)
+            VALUES (?, ?, ?, 1)
+        """, (
+            new_id,
+            data["title"],
+            message.text
+        ))
+
+        db.commit()
+
+    await state.clear()
+
+    await message.answer(
+        f"""
+✅ <b>Глава создана.</b>
+
+Номер: <b>{new_id + 1}</b>
+
+Теперь её можно открыть в редакторе
+и добавить улики/картинку.
+""",
+        reply_markup=admin_keyboard()
+    )
+
+
+# ============================================================
+# ADD CLUE
+# ============================================================
+
+@dp.callback_query(F.data.startswith("add_clue:"))
+async def add_clue_start(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+
+    if not admin_only(callback.from_user.id):
+        return
+
+    chapter_id = int(
+        callback.data.split(":")[1]
+    )
+
+    await state.update_data(
+        chapter_id=chapter_id
+    )
+
+    await state.set_state(
+        AdminState.add_clue_title
+    )
+
+    await callback.message.answer(
+        """
+🔎 <b>Новая улика</b>
+
+Напиши название.
+
+Например:
+
+🎫 Проверить билет
+"""
+    )
+
+    await callback.answer()
+
+
+@dp.message(AdminState.add_clue_title)
+async def add_clue_title_finish(
+    message: Message,
+    state: FSMContext
+):
+
+    if not admin_only(message.from_user.id):
+        return
+
+    await state.update_data(
+        clue_title=message.text.strip()
+    )
+
+    await state.set_state(
+        AdminState.add_clue_text
+    )
+
+    await message.answer(
+        """
+📝 Теперь отправь текст улики.
+
+После этого она появится у игроков.
+"""
+    )
+
+
+@dp.message(AdminState.add_clue_text)
+async def add_clue_text_finish(
+    message: Message,
+    state: FSMContext
+):
+
+    if not admin_only(message.from_user.id):
+        return
+
+    data = await state.get_data()
+
+    clue_key = (
+        "custom_"
+        + str(int(datetime.now().timestamp()))
+    )
+
+    with closing(db_connect()) as db:
+
+        db.execute("""
+            INSERT INTO clues
+            (chapter_id, clue_key, title, text, reward_xp)
+            VALUES (?, ?, ?, ?, 20)
+        """, (
+            data["chapter_id"],
+            clue_key,
+            data["clue_title"],
+            message.text
+        ))
+
+        db.commit()
+
+    await state.clear()
+
+    await message.answer(
+        "✅ Улика добавлена.",
+        reply_markup=admin_keyboard()
+    )
+
+
+# ============================================================
+# ADMIN USERS
 # ============================================================
 
 @dp.callback_query(F.data == "admin_users")
 async def admin_users(callback: CallbackQuery):
 
-    if not is_admin(callback.from_user.id):
+    if not admin_only(callback.from_user.id):
         return
 
-    with closing(conn()) as db:
+    with closing(db_connect()) as db:
+
         rows = db.execute("""
-            SELECT nickname, game_number, xp, chapter
+            SELECT nickname, game_number, xp, hp, chapter
             FROM users
             ORDER BY xp DESC
-            LIMIT 15
+            LIMIT 20
         """).fetchall()
 
     if not rows:
-        text = "<b>👥 ИГРОКИ</b>\n\nПока игроков нет."
+
+        text = "<b>👥 ИГРОКИ</b>\n\nИгроков пока нет."
+
     else:
 
         lines = []
 
         for row in rows:
+
             lines.append(
                 f"🎫 #{row['game_number']} "
-                f"<b>{row['nickname']}</b>\n"
-                f"   Глава: {row['chapter']} | XP: {row['xp']}"
+                f"<b>{safe(row['nickname'])}</b>\n"
+                f"📖 {row['chapter'] + 1}/20 "
+                f"⭐ {row['xp']} "
+                f"❤️ {row['hp']}"
             )
 
         text = (
@@ -1468,92 +2721,197 @@ async def admin_users(callback: CallbackQuery):
 
     await callback.message.edit_text(
         text,
-        reply_markup=back_menu()
+        reply_markup=back_keyboard()
     )
 
     await callback.answer()
 
 
 # ============================================================
-# АДМИН — ЗАГЛУШКИ УПРАВЛЕНИЯ
+# ADMIN STATS
 # ============================================================
 
-@dp.callback_query(F.data == "admin_start")
-async def admin_start(callback: CallbackQuery):
+@dp.callback_query(F.data == "admin_stats")
+async def admin_stats(callback: CallbackQuery):
 
-    if not is_admin(callback.from_user.id):
+    if not admin_only(callback.from_user.id):
         return
 
-    await callback.answer(
-        "🟢 Тестовая охота запущена.",
-        show_alert=True
+    with closing(db_connect()) as db:
+
+        users = db.execute(
+            "SELECT COUNT(*) FROM users"
+        ).fetchone()[0]
+
+        clues = db.execute(
+            "SELECT COUNT(*) FROM found_clues"
+        ).fetchone()[0]
+
+        chapters = db.execute(
+            "SELECT COUNT(*) FROM chapters"
+        ).fetchone()[0]
+
+        avg_xp = db.execute(
+            "SELECT COALESCE(AVG(xp),0) FROM users"
+        ).fetchone()[0]
+
+    await callback.message.edit_text(
+        f"""
+<b>📊 СТАТИСТИКА</b>
+
+👥 Игроков: <b>{users}</b>
+
+📖 Глав: <b>{chapters}</b>
+
+🔎 Найдено улик:
+<b>{clues}</b>
+
+⭐ Средний XP:
+<b>{avg_xp:.1f}</b>
+
+🧪 Бета:
+<b>{"🟢 включена" if beta_active() else "🔴 выключена"}</b>
+""",
+        reply_markup=back_keyboard()
     )
 
-
-@dp.callback_query(F.data == "admin_stop")
-async def admin_stop(callback: CallbackQuery):
-
-    if not is_admin(callback.from_user.id):
-        return
-
-    await callback.answer(
-        "🔴 Охота остановлена.",
-        show_alert=True
-    )
-
-
-@dp.callback_query(F.data == "admin_edit")
-async def admin_edit(callback: CallbackQuery):
-
-    if not is_admin(callback.from_user.id):
-        return
-
-    await callback.answer(
-        "✏️ Редактор будет использоваться для изменения глав.",
-        show_alert=True
-    )
-
-
-@dp.callback_query(F.data == "admin_create")
-async def admin_create(callback: CallbackQuery):
-
-    if not is_admin(callback.from_user.id):
-        return
-
-    await callback.answer(
-        "➕ Здесь будет создание новой главы.",
-        show_alert=True
-    )
-
-
-@dp.callback_query(F.data == "admin_image")
-async def admin_image(callback: CallbackQuery):
-
-    if not is_admin(callback.from_user.id):
-        return
-
-    await callback.answer(
-        "🖼️ Здесь будет добавление изображения к главе.",
-        show_alert=True
-    )
+    await callback.answer()
 
 
 # ============================================================
-# ЗАПУСК
+# ADMIN SETTINGS
+# ============================================================
+
+@dp.callback_query(F.data == "admin_settings")
+async def admin_settings(callback: CallbackQuery):
+
+    if not admin_only(callback.from_user.id):
+        return
+
+    await callback.message.edit_text(
+        f"""
+<b>⚙️ НАСТРОЙКИ</b>
+
+🧪 Бета:
+<b>{"🟢 включена" if beta_active() else "🔴 выключена"}</b>
+
+🔐 Admin ID:
+<b>{ADMIN_ID}</b>
+
+💾 База:
+<b>{DB_PATH}</b>
+
+История хранится отдельно от кода.
+
+Поэтому после изменения главы
+при следующем деплое она не исчезнет.
+""",
+        reply_markup=back_keyboard()
+    )
+
+    await callback.answer()
+
+
+# ============================================================
+# ADMIN MENU CALLBACK
+# ============================================================
+
+@dp.callback_query(F.data == "admin")
+async def admin_menu_callback(callback: CallbackQuery):
+
+    if not admin_only(callback.from_user.id):
+        return
+
+    await callback.message.edit_text(
+        """
+<b>🔐 МОЁ ПРОСТРАНСТВО</b>
+
+Полное управление «ОХОТОЙ».
+""",
+        reply_markup=admin_keyboard()
+    )
+
+    await callback.answer()
+
+
+# ============================================================
+# UNKNOWN TEXT
+# ============================================================
+
+@dp.message(F.text)
+async def unknown_text(message: Message, state: FSMContext):
+
+    current_state = await state.get_state()
+
+    if current_state:
+        return
+
+    user = get_user(message.from_user.id)
+
+    if not user:
+
+        await message.answer(
+            """
+Я не понял команду.
+
+Нажми большую кнопку:
+
+<b>🔎 НАЧАТЬ ОХОТУ</b>
+""",
+            reply_markup=main_keyboard()
+        )
+
+        return
+
+    await message.answer(
+        """
+Выбери действие из меню.
+
+<b>🔎 НАЧАТЬ ОХОТУ</b> — продолжить расследование.
+""",
+        reply_markup=main_keyboard()
+    )
+
+
+# ============================================================
+# ERROR HANDLER
+# ============================================================
+
+@dp.errors()
+async def errors_handler(event):
+
+    logging.exception(
+        "Ошибка обработки события: %s",
+        event.exception
+    )
+
+    return True
+
+
+# ============================================================
+# MAIN
 # ============================================================
 
 async def main():
 
     init_db()
+    seed_story()
 
-    logging.info("=================================")
+    logging.info("======================================")
     logging.info("🕵️ ОХОТА запускается")
-    logging.info("История: Последний рейс")
-    logging.info("=================================")
+    logging.info("📖 20 этапов расследования")
+    logging.info("🧪 Beta: %s", beta_active())
+    logging.info("🔐 Admin ID: %s", ADMIN_ID)
+    logging.info("======================================")
 
-    await bot.delete_webhook(drop_pending_updates=True)
+    await bot.delete_webhook(
+        drop_pending_updates=True
+    )
 
-    await dp.start_polling(bot)
+    await dp.start_polling(
+        bot,
+        allowed_updates=dp.resolve_used_update_types()
+    )
 
 
 if __name__ == "__main__":
