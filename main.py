@@ -6,6 +6,9 @@ import re
 from contextlib import closing
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.enums import ParseMode
+
+from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import CommandStart
 from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -29,7 +32,12 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
 
-bot = Bot(TOKEN)
+bot = Bot(
+    TOKEN,
+    default=DefaultBotProperties(
+        parse_mode=ParseMode.HTML
+    )
+)
 dp = Dispatcher()
 
 
@@ -188,9 +196,9 @@ async def registration(message: Message):
 
     bad_words = (
         "хуй",
-        "пизд",
-        "еб",
-        "бляд",
+        "пизда",
+        "ебать",
+        "блядь",
         "сука",
         "дебил",
     )
