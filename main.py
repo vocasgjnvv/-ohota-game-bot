@@ -3,7 +3,7 @@ import logging
 import os
 import sqlite3
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
@@ -133,6 +133,12 @@ async def start_handler(message: Message):
         f"🎯 Скоро здесь появятся первые миссии.",
         reply_markup=main_menu, 
         )
+        @dp.message(F.text == "🎯 Миссии")
+async def missions_handler(message: Message):
+    await message.answer(
+        "🎯 <b>МИССИИ</b>\n\n"
+        "Пока активных миссий нет."
+    )
 
 
 @dp.message()
