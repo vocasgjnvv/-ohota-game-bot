@@ -133,7 +133,7 @@ async def start_handler(message: Message):
         f"🎯 Скоро здесь появятся первые миссии.",
         reply_markup=main_menu, 
         )
-        @dp.message(F.text == "🎯 Миссии")
+@dp.message(F.text == "🎯 Миссии")
 async def missions_handler(message: Message):
     await message.answer(
         "🎯 <b>МИССИИ</b>\n\n"
