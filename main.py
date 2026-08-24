@@ -65,7 +65,8 @@ def init_db():
             active INTEGER DEFAULT 1
         )
     """)
-        cursor = connection.cursor()
+    
+    cursor = connection.cursor()
 
     cursor.execute(
         "SELECT id FROM missions LIMIT 1"
