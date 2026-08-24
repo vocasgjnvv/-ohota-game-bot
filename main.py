@@ -231,6 +231,43 @@ async def missions_handler(message: Message):
         )
 
     await message.answer(text)
+@dp.callback_query(F.data.startswith("join_mission:"))
+async def join_mission_handler(callback):
+    mission_id = int(callback.data.split(":")[1])
+    telegram_id = callback.from_user.id
+
+    connection = sqlite3.connect(DB_FILE)
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        INSERT OR IGNORE INTO mission_participants
+        (mission_id, telegram_id)
+        VALUES (?, ?)
+        """,
+        (mission_id, telegram_id),
+    )
+
+    connection.commit()
+
+    cursor.execute(
+        """
+        SELECT changes()
+        """
+    )
+
+    inserted = cursor.fetchone()[0]
+
+    connection.close()
+
+    if inserted:
+        await callback.answer("✅ Ты участвуешь в миссии!")
+        await callback.message.answer(
+            "🎯 <b>Участие подтверждено!</b>\n\n"
+            "Теперь выполни условия миссии."
+        )
+    else:
+        await callback.answer("ℹ️ Ты уже участвуешь в этой миссии.")
 @dp.message(F.text == "👤 Мой профиль")
 async def profile_handler(message: Message):
     player = get_or_create_player(message)
