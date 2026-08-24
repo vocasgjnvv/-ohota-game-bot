@@ -55,7 +55,7 @@ def init_db():
         )
     """)
     
-        connection.execute("""
+    connection.execute("""
         CREATE TABLE IF NOT EXISTS missions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             title TEXT NOT NULL,
