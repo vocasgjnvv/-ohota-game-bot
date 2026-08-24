@@ -72,10 +72,18 @@ def init_db():
             mission_id INTEGER NOT NULL,
             telegram_id INTEGER NOT NULL,
             status TEXT DEFAULT 'joined',
+            reward_given INTEGER DEFAULT 0,
             joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(mission_id, telegram_id)
         )
     """)
+    try:
+        connection.execute(
+            "ALTER TABLE mission_participants "
+            "ADD COLUMN reward_given INTEGER DEFAULT 0"
+        )
+    except sqlite3.OperationalError:
+        pass
     
     cursor = connection.cursor()
 
