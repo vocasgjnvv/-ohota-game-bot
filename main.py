@@ -66,6 +66,17 @@ def init_db():
         )
     """)
     
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS mission_participants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mission_id INTEGER NOT NULL,
+            telegram_id INTEGER NOT NULL,
+            status TEXT DEFAULT 'joined',
+            joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(mission_id, telegram_id)
+        )
+    """)
+    
     cursor = connection.cursor()
 
     cursor.execute(
