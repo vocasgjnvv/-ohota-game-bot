@@ -226,23 +226,23 @@ async def missions_handler(message: Message):
 
         connection.close()
 
-if participation:
-    button_text = "🏁 Выполнить миссию"
-    callback_action = f"complete_mission:{mission_id}"
-else:
-    button_text = "▶️ Участвовать"
-    callback_action = f"join_mission:{mission_id}"
+        if participation:
+            button_text = "🏁 Выполнить миссию"
+            callback_action = f"complete_mission:{mission_id}"
+        else:
+            button_text = "▶️ Участвовать"
+            callback_action = f"join_mission:{mission_id}"
 
-keyboard = InlineKeyboardMarkup(
-    inline_keyboard=[
-        [
-            InlineKeyboardButton(
-                text=button_text,
-                callback_data=callback_action
-            )
-        ]
-    ]
-)
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text=button_text,
+                        callback_data=callback_action
+                    )
+                ]
+            ]
+        )
 
         await message.answer(
             f"🎯 <b>Миссия №{mission_id}</b>\n"
