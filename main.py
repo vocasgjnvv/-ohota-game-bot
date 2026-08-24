@@ -139,6 +139,17 @@ async def missions_handler(message: Message):
         "🎯 <b>МИССИИ</b>\n\n"
         "Пока активных миссий нет."
     )
+@dp.message(F.text == "👤 Мой профиль")
+async def profile_handler(message: Message):
+    player = get_or_create_player(message)
+
+    await message.answer(
+        "👤 <b>МОЙ ПРОФИЛЬ</b>\n\n"
+        f"🆔 ID: <code>{message.from_user.id}</code>\n"
+        f"👤 Имя: <b>{message.from_user.first_name or 'Не указано'}</b>\n"
+        f"⭐ Очки: <b>{player[2]}</b>\n"
+        f"⚡ Опыт: <b>{player[1]}</b>"
+    )
 
 
 @dp.message()
