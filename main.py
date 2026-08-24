@@ -207,7 +207,7 @@ async def missions_handler(message: Message):
 
     text = "🎯 <b>АКТИВНЫЕ МИССИИ</b>\n\n"
 
-       for mission in missions:
+    for mission in missions:
         mission_id, title, description, reward_xp, reward_score = mission
 
         keyboard = InlineKeyboardMarkup(
