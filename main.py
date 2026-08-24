@@ -190,6 +190,17 @@ async def rating_handler(message: Message):
 
     await message.answer(text)
 
+@dp.message(F.text == "📜 Правила")
+async def rules_handler(message: Message):
+    await message.answer(
+        "📜 <b>ПРАВИЛА ОХОТЫ</b>\n\n"
+        "1️⃣ Выполняй доступные миссии.\n"
+        "2️⃣ За выполнение миссий получай очки и опыт.\n"
+        "3️⃣ Не используй запрещённые способы выполнения заданий.\n"
+        "4️⃣ Не пытайся обмануть систему.\n"
+        "5️⃣ Следи за новыми миссиями и участвуй в них.\n\n"
+        "🎯 Главная цель — выполнять миссии и подниматься в рейтинге."
+    )
 
 @dp.message()
 async def message_handler(message: Message):
