@@ -150,6 +150,45 @@ async def profile_handler(message: Message):
         f"⭐ Очки: <b>{player[2]}</b>\n"
         f"⚡ Опыт: <b>{player[1]}</b>"
     )
+@dp.message(F.text == "🏆 Рейтинг")
+async def rating_handler(message: Message):
+    connection = sqlite3.connect(DB_FILE)
+
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        SELECT first_name, username, score
+        FROM players
+        ORDER BY score DESC, xp DESC
+        LIMIT 10
+        """
+    )
+
+    players = cursor.fetchall()
+
+    connection.close()
+
+    if not players:
+        await message.answer(
+            "🏆 <b>РЕЙТИНГ</b>\n\n"
+            "Пока игроков нет."
+        )
+        return
+
+    text = "🏆 <b>РЕЙТИНГ</b>\n\n"
+
+    for position, player in enumerate(players, start=1):
+        first_name, username, score = player
+
+        name = first_name or username or "Охотник"
+
+        text += (
+            f"{position}. {name} — "
+            f"⭐ <b>{score}</b>\n"
+        )
+
+    await message.answer(text)
 
 
 @dp.message()
