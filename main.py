@@ -210,7 +210,7 @@ async def missions_handler(message: Message):
     for mission in missions:
         mission_id, title, description, reward_xp, reward_score = mission
 
-                 connection = sqlite3.connect(DB_FILE)
+        connection = sqlite3.connect(DB_FILE)
         cursor = connection.cursor()
 
         cursor.execute(
