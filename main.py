@@ -130,8 +130,9 @@ async def start_handler(message: Message):
         f"👤 Твой профиль создан.\n\n"
         f"⭐ Очки: <b>{player[2]}</b>\n"
         f"⚡ Опыт: <b>{player[1]}</b>\n\n"
-        f"🎯 Скоро здесь появятся первые миссии."
-    )
+        f"🎯 Скоро здесь появятся первые миссии.",
+        reply_markup=main_menu, 
+        )
 
 
 @dp.message()
