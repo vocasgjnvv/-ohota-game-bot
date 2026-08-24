@@ -170,10 +170,44 @@ async def start_handler(message: Message):
         )
 @dp.message(F.text == "🎯 Миссии")
 async def missions_handler(message: Message):
-    await message.answer(
-        "🎯 <b>МИССИИ</b>\n\n"
-        "Пока активных миссий нет."
+    connection = sqlite3.connect(DB_FILE)
+
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        SELECT id, title, description, reward_xp, reward_score
+        FROM missions
+        WHERE active = 1
+        ORDER BY id ASC
+        """
     )
+
+    missions = cursor.fetchall()
+
+    connection.close()
+
+    if not missions:
+        await message.answer(
+            "🎯 <b>МИССИИ</b>\n\n"
+            "Сейчас активных миссий нет."
+        )
+        return
+
+    text = "🎯 <b>АКТИВНЫЕ МИССИИ</b>\n\n"
+
+    for mission in missions:
+        mission_id, title, description, reward_xp, reward_score = mission
+
+        text += (
+            f"🎯 <b>Миссия №{mission_id}</b>\n"
+            f"<b>{title}</b>\n\n"
+            f"{description}\n\n"
+            f"⚡ Опыт: <b>{reward_xp}</b>\n"
+            f"⭐ Очки: <b>{reward_score}</b>\n\n"
+        )
+
+    await message.answer(text)
 @dp.message(F.text == "👤 Мой профиль")
 async def profile_handler(message: Message):
     player = get_or_create_player(message)
