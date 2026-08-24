@@ -201,6 +201,14 @@ async def rules_handler(message: Message):
         "5️⃣ Следи за новыми миссиями и участвуй в них.\n\n"
         "🎯 Главная цель — выполнять миссии и подниматься в рейтинге."
     )
+@dp.message(F.text == "💬 Чат")
+async def chat_handler(message: Message):
+    await message.answer(
+        "💬 <b>ЧАТ</b>\n\n"
+        "Чат пока не подключён.\n"
+        "Скоро здесь появится ссылка на чат ОХОТЫ."
+    )
+    
 
 @dp.message()
 async def message_handler(message: Message):
