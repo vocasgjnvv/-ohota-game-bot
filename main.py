@@ -21,6 +21,23 @@ if not BOT_TOKEN:
 DB_FILE = "ohota.db"
 
 dp = Dispatcher()
+main_menu = ReplyKeyboardMarkup(
+    keyboard=[
+        [
+            KeyboardButton(text="🕵️ Начать"),
+            KeyboardButton(text="🎯 Миссии"),
+        ],
+        [
+            KeyboardButton(text="👤 Мой профиль"),
+            KeyboardButton(text="🏆 Рейтинг"),
+        ],
+        [
+            KeyboardButton(text="📜 Правила"),
+            KeyboardButton(text="💬 Чат"),
+        ],
+    ],
+    resize_keyboard=True,
+)
 
 
 def init_db():
