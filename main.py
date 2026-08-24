@@ -65,6 +65,29 @@ def init_db():
             active INTEGER DEFAULT 1
         )
     """)
+        cursor = connection.cursor()
+
+    cursor.execute(
+        "SELECT id FROM missions LIMIT 1"
+    )
+
+    mission = cursor.fetchone()
+
+    if mission is None:
+        cursor.execute(
+            """
+            INSERT INTO missions
+            (title, description, reward_xp, reward_score, active)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                "Первая охота",
+                "Найди первого участника ОХОТЫ и приведи его в игру.",
+                100,
+                50,
+                1,
+            ),
+        )
 
     connection.commit()
     connection.close()
