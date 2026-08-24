@@ -207,15 +207,27 @@ async def missions_handler(message: Message):
 
     text = "🎯 <b>АКТИВНЫЕ МИССИИ</b>\n\n"
 
-    for mission in missions:
+        for mission in missions:
         mission_id, title, description, reward_xp, reward_score = mission
 
-        text += (
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="▶️ Участвовать",
+                        callback_data=f"join_mission:{mission_id}"
+                    )
+                ]
+            ]
+        )
+
+        await message.answer(
             f"🎯 <b>Миссия №{mission_id}</b>\n"
             f"<b>{title}</b>\n\n"
             f"{description}\n\n"
             f"⚡ Опыт: <b>{reward_xp}</b>\n"
-            f"⭐ Очки: <b>{reward_score}</b>\n\n"
+            f"⭐ Очки: <b>{reward_score}</b>",
+            reply_markup=keyboard,
         )
 
     await message.answer(text)
