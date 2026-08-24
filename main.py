@@ -210,11 +210,32 @@ async def missions_handler(message: Message):
     for mission in missions:
         mission_id, title, description, reward_xp, reward_score = mission
 
+                 connection = sqlite3.connect(DB_FILE)
+        cursor = connection.cursor()
+
+        cursor.execute(
+            """
+            SELECT id
+            FROM mission_participants
+            WHERE mission_id = ? AND telegram_id = ?
+            """,
+            (mission_id, message.from_user.id),
+        )
+
+        participation = cursor.fetchone()
+
+        connection.close()
+
+        if participation:
+            button_text = "✅ Вы участвуете"
+        else:
+            button_text = "▶️ Участвовать"
+
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
                     InlineKeyboardButton(
-                        text="▶️ Участвовать",
+                        text=button_text,
                         callback_data=f"join_mission:{mission_id}"
                     )
                 ]
