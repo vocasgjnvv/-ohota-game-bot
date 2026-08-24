@@ -54,6 +54,17 @@ def init_db():
             score INTEGER DEFAULT 0
         )
     """)
+    
+        connection.execute("""
+        CREATE TABLE IF NOT EXISTS missions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL,
+            reward_xp INTEGER DEFAULT 0,
+            reward_score INTEGER DEFAULT 0,
+            active INTEGER DEFAULT 1
+        )
+    """)
 
     connection.commit()
     connection.close()
