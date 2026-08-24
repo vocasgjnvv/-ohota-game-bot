@@ -1,71 +1,12 @@
 from pathlib import Path
 import zipfile, textwrap
 
-root = Path("/mnt/data/ohota_game_bot_new")
-if root.exists():
-    import shutil
-    shutil.rmtree(root)
+root = Path("/mnt/data/ohota_v2_foundation")
+(root / "database" / "repositories").mkdir(parents=True, exist_ok=True)
 
 files = {
-"main.py": r'''import asyncio
-import logging
-
-from aiogram import Bot, Dispatcher
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
-from aiogram.filters import CommandStart
-from aiogram.types import Message
-
-from config import settings
-from database.db import init_db
-from database.repositories.users import upsert_user
-from handlers.menu import router
-
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
-
-dp = Dispatcher()
-dp.include_router(router)
-
-
-@dp.message(CommandStart())
-async def start_handler(message: Message) -> None:
-    await upsert_user(message.from_user)
-    await message.answer(
-        "👋 Добро пожаловать в <b>Охота</b>!\n\n"
-        "Выбери раздел в меню ниже."
-    )
-
-
-async def main() -> None:
-    await init_db()
-
-    bot = Bot(
-        token=settings.bot_token,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-    )
-
-    logging.info("Bot started")
-    try:
-        await dp.start_polling(bot)
-    finally:
-        await bot.session.close()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-''',
-
 "config.py": r'''import os
 from dataclasses import dataclass
-
-from dotenv import load_dotenv
-
-
-load_dotenv()
 
 
 @dataclass(frozen=True)
@@ -79,16 +20,20 @@ class Settings:
 def load_settings() -> Settings:
     token = os.getenv("BOT_TOKEN", "").strip()
     if not token:
-        raise RuntimeError("BOT_TOKEN is not set in .env")
+        raise RuntimeError("BOT_TOKEN is not set")
 
-    admin_id_raw = os.getenv("ADMIN_ID", "0").strip()
+    raw_admin_id = os.getenv("ADMIN_ID", "0").strip()
     try:
-        admin_id = int(admin_id_raw)
+        admin_id = int(raw_admin_id)
     except ValueError as exc:
         raise RuntimeError("ADMIN_ID must be an integer") from exc
 
-    database_url = os.getenv("DATABASE_URL", "sqlite:///ohota.db").strip()
-    beta_mode = os.getenv("BETA_MODE", "true").lower() in {
+    database_url = os.getenv(
+        "DATABASE_URL",
+        "sqlite+aiosqlite:///./data/ohota_v2.db",
+    ).strip()
+
+    beta_mode = os.getenv("BETA_MODE", "false").lower() in {
         "1", "true", "yes", "on"
     }
 
@@ -102,284 +47,576 @@ def load_settings() -> Settings:
 
 settings = load_settings()
 ''',
-
 "database/__init__.py": "",
 "database/db.py": r'''from pathlib import Path
 
-import aiosqlite
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import DeclarativeBase
+
+from config import settings
 
 
-DB_PATH = Path("ohota.db")
+class Base(DeclarativeBase):
+    pass
+
+
+def _prepare_sqlite_path(database_url: str) -> None:
+    if database_url.startswith("sqlite"):
+        Path("data").mkdir(parents=True, exist_ok=True)
+
+
+_prepare_sqlite_path(settings.database_url)
+
+engine: AsyncEngine = create_async_engine(
+    settings.database_url,
+    echo=False,
+    pool_pre_ping=True,
+)
+
+SessionLocal = async_sessionmaker(
+    engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+)
 
 
 async def init_db() -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                telegram_id INTEGER PRIMARY KEY,
-                username TEXT,
-                first_name TEXT NOT NULL DEFAULT '',
-                last_name TEXT NOT NULL DEFAULT '',
-                points INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-        await db.commit()
-''',
+    # Import models before create_all so SQLAlchemy knows every table.
+    from database import models  # noqa: F401
 
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+
+async def close_db() -> None:
+    await engine.dispose()
+''',
+"database/models.py": r'''from datetime import datetime
+from enum import Enum
+
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from database.db import Base
+
+
+class PlayerStatus(str, Enum):
+    ACTIVE = "active"
+    BLOCKED = "blocked"
+    FINISHED = "finished"
+
+
+class MissionStatus(str, Enum):
+    DRAFT = "draft"
+    WAITING = "waiting"
+    ACTIVE = "active"
+    FINISHED = "finished"
+    ARCHIVED = "archived"
+
+
+class InteractionStatus(str, Enum):
+    PENDING = "pending"
+    ACTIVE = "active"
+    COMPLETED = "completed"
+    EXPIRED = "expired"
+    CANCELLED = "cancelled"
+
+
+class ClueType(str, Enum):
+    TEXT = "text"
+    TARGET_PLAYER = "target_player"
+    CHOICE = "choice"
+
+
+class Player(Base):
+    tablename = "players"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    username: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    first_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    last_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    xp: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_score: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    status: Mapped[str] = mapped_column(
+        String(32), default=PlayerStatus.ACTIVE.value, nullable=False
+    )
+    current_mission_id: Mapped[int | None] = mapped_column(
+        ForeignKey("missions.id", ondelete="SET NULL"), nullable=True
+    )
+    current_stage_id: Mapped[int | None] = mapped_column(
+        ForeignKey("stages.id", ondelete="SET NULL"), nullable=True
+    )
+    current_branch: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+DateTime, default=datetime.utcnow, nullable=False
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+    mission_links: Mapped[list["MissionPlayer"]] = relationship(
+        back_populates="player", foreign_keys="MissionPlayer.player_id"
+    )
+
+
+class Mission(Base):
+    tablename = "missions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+    status: Mapped[str] = mapped_column(
+        String(32), default=MissionStatus.DRAFT.value, nullable=False, index=True
+    )
+    max_players: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    time_limit_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    stages: Mapped[list["Stage"]] = relationship(
+        back_populates="mission", cascade="all, delete-orphan"
+    )
+    players: Mapped[list["MissionPlayer"]] = relationship(
+        back_populates="mission", cascade="all, delete-orphan"
+    )
+
+
+class Stage(Base):
+    tablename = "stages"
+    table_args = (
+        UniqueConstraint("mission_id", "number", name="uq_stage_mission_number"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    mission_id: Mapped[int] = mapped_column(
+        ForeignKey("missions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    number: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    time_limit_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    mission: Mapped["Mission"] = relationship(back_populates="stages")
+    clues: Mapped[list["Clue"]] = relationship(
+        back_populates="stage", cascade="all, delete-orphan"
+    )
+
+
+class MissionPlayer(Base):
+    tablename = "mission_players"
+    table_args = (
+        UniqueConstraint("mission_id", "player_id", name="uq_mission_player"),
+        Index("ix_mission_players_mission_status", "mission_id", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    mission_id: Mapped[int] = mapped_column(
+        ForeignKey("missions.id", ondelete="CASCADE"), nullable=False
+    )
+    player_id: Mapped[int] = mapped_column(
+        ForeignKey("players.id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
+    joined_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    mission: Mapped["Mission"] = relationship(back_populates="players")
+    player: Mapped["Player"] = relationship(back_populates="mission_links")
+
+
+class Clue(Base):
+    tablename = "clues"
+    table_args = (
+        Index("ix_clues_owner_stage", "owner_player_id", "stage_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    stage_id: Mapped[int] = mapped_column(
+        ForeignKey("stages.id", ondelete="CASCADE"), nullable=False
+    )
+    owner_player_id: Mapped[int] = mapped_column(
+        ForeignKey("players.id", ondelete="CASCADE"), nullable=False
+    )
+    target_player_id: Mapped[int | None] = mapped_column(
+        ForeignKey("players.id", ondelete="SET NULL"), nullable=True
+    )
+
+    clue_type: Mapped[str] = mapped_column(
+        String(32), default=ClueType.TEXT.value, nullable=False
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+text: Mapped[str] = mapped_column(Text, nullable=False)
+    is_secret: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
+
+    stage: Mapped["Stage"] = relationship(back_populates="clues")
+
+
+class Interaction(Base):
+    tablename = "interactions"
+    table_args = (
+        Index("ix_interactions_mission_stage", "mission_id", "stage_id"),
+        Index("ix_interactions_players", "initiator_id", "target_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    mission_id: Mapped[int] = mapped_column(
+        ForeignKey("missions.id", ondelete="CASCADE"), nullable=False
+    )
+    stage_id: Mapped[int] = mapped_column(
+        ForeignKey("stages.id", ondelete="CASCADE"), nullable=False
+    )
+    initiator_id: Mapped[int] = mapped_column(
+        ForeignKey("players.id", ondelete="CASCADE"), nullable=False
+    )
+    target_id: Mapped[int] = mapped_column(
+        ForeignKey("players.id", ondelete="CASCADE"), nullable=False
+    )
+
+    interaction_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32), default=InteractionStatus.PENDING.value, nullable=False
+    )
+    branch: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    result: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class InteractionAction(Base):
+    tablename = "interaction_actions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    interaction_id: Mapped[int] = mapped_column(
+        ForeignKey("interactions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    player_id: Mapped[int] = mapped_column(
+        ForeignKey("players.id", ondelete="CASCADE"), nullable=False
+    )
+    action_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
+
+
+class ScoreEvent(Base):
+    tablename = "score_events"
+    table_args = (
+        Index("ix_score_events_player_created", "player_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    player_id: Mapped[int] = mapped_column(
+        ForeignKey("players.id", ondelete="CASCADE"), nullable=False
+    )
+    mission_id: Mapped[int | None] = mapped_column(
+        ForeignKey("missions.id", ondelete="SET NULL"), nullable=True
+    )
+    stage_id: Mapped[int | None] = mapped_column(
+        ForeignKey("stages.id", ondelete="SET NULL"), nullable=True
+    )
+    interaction_id: Mapped[int | None] = mapped_column(
+        ForeignKey("interactions.id", ondelete="SET NULL"), nullable=True
+    )
+
+    xp_delta: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    score_delta: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    reason: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
+
+
+class GameState(Base):
+    tablename = "game_states"
+    table_args = (
+        UniqueConstraint(
+            "mission_id", "player_id", name="uq_game_state_mission_player"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    mission_id: Mapped[int] = mapped_column(
+        ForeignKey("missions.id", ondelete="CASCADE"), nullable=False
+    )
+    player_id: Mapped[int] = mapped_column(
+        ForeignKey("players.id", ondelete="CASCADE"), nullable=False
+    )
+    stage_id: Mapped[int | None] = mapped_column(
+        ForeignKey("stages.id", ondelete="SET NULL"), nullable=True
+    )
+branch: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    state: Mapped[str] = mapped_column(String(64), default="active", nullable=False)
+    payload: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+''',
 "database/repositories/__init__.py": "",
-"database/repositories/users.py": r'''import aiosqlite
-from aiogram.types import User
+"database/repositories/players.py": r'''from datetime import datetime
 
-from database.db import DB_PATH
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-
-async def upsert_user(user: User) -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            """
-            INSERT INTO users (
-                telegram_id, username, first_name, last_name
-            )
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(telegram_id) DO UPDATE SET
-                username = excluded.username,
-                first_name = excluded.first_name,
-                last_name = excluded.last_name,
-                updated_at = CURRENT_TIMESTAMP
-            """,
-            (
-                user.id,
-                user.username,
-                user.first_name or "",
-                user.last_name or "",
-            ),
-        )
-        await db.commit()
+from database.models import Player
 
 
-async def get_user(telegram_id: int) -> tuple | None:
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(
-            """
-            SELECT telegram_id, username, first_name, last_name, points
-            FROM users
-            WHERE telegram_id = ?
-            """,
-            (telegram_id,),
-        )
-        return await cursor.fetchone()
-
-
-async def get_top_users(limit: int = 10) -> list[tuple]:
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(
-            """
-            SELECT telegram_id, username, first_name, points
-            FROM users
-            ORDER BY points DESC, telegram_id ASC
-            LIMIT ?
-            """,
-            (limit,),
-        )
-        return await cursor.fetchall()
-''',
-
-"handlers/__init__.py": "",
-"handlers/menu.py": r'''from aiogram import Router, F
-from aiogram.types import CallbackQuery, Message
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-
-from database.repositories.users import get_top_users, get_user
-
-
-router = Router()
-
-
-def main_menu():
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🕵️ Начать", callback_data="start_game")
-    builder.button(text="🎯 Миссии", callback_data="missions")
-    builder.button(text="👤 Мой профиль", callback_data="profile")
-    builder.button(text="🏆 Рейтинг", callback_data="rating")
-    builder.button(text="📜 Правила", callback_data="rules")
-    builder.button(text="💬 Чат", callback_data="chat")
-    builder.adjust(2, 2, 2)
-    return builder.as_markup()
-
-
-async def show_menu(message: Message) -> None:
-    await message.answer(
-        "📋 <b>Главное меню</b>\n\nВыбери нужный раздел:",
-        reply_markup=main_menu(),
+async def get_or_create_player(
+    session: AsyncSession,
+    telegram_id: int,
+    username: str | None,
+    first_name: str | None,
+    last_name: str | None,
+) -> Player:
+    result = await session.execute(
+        select(Player).where(Player.telegram_id == telegram_id)
     )
+    player = result.scalar_one_or_none()
 
+    now = datetime.utcnow()
 
-@router.message(F.text == "☰ Меню")
-async def menu_message(message: Message) -> None:
-    await show_menu(message)
-
-
-@router.callback_query(F.data == "start_game")
-async def start_game(callback: CallbackQuery) -> None:
-    await callback.answer()
-    await callback.message.edit_text(
-        "🕵️ <b>Начать</b>\n\n"
-        "Игровая механика пока находится в разработке.\n"
-        "Следующим этапом подключим реальные миссии."
-        ,
-        reply_markup=main_menu(),
-    )
-
-
-@router.callback_query(F.data == "missions")
-async def missions(callback: CallbackQuery) -> None:
-    await callback.answer()
-    await callback.message.edit_text(
-        "🎯 <b>Миссии</b>\n\n"
-        "Пока активных миссий нет.",
-        reply_markup=main_menu(),
-    )
-
-
-@router.callback_query(F.data == "profile")
-async def profile(callback: CallbackQuery) -> None:
-    await callback.answer()
-    user = await get_user(callback.from_user.id)
-
-    if not user:
-        text = "👤 Профиль пока не создан."
+    if player is None:
+        player = Player(
+            telegram_id=telegram_id,
+            username=username,
+            first_name=first_name,
+            last_name=last_name,
+            last_seen_at=now,
+        )
+        session.add(player)
     else:
-        telegram_id, username, first_name, last_name, points = user
-        name = " ".join(x for x in [first_name, last_name] if x).strip()
-        username_text = f"@{username}" if username else "не указан"
-        text = (
-            "👤 <b>Мой профиль</b>\n\n"
-            f"Имя: {name or 'не указано'}\n"
-            f"Username: {username_text}\n"
-            f"ID: <code>{telegram_id}</code>\n"
-            f"⭐ Очки: <b>{points}</b>"
+        player.username = username
+        player.first_name = first_name
+        player.last_name = last_name
+        player.last_seen_at = now
+
+    await session.flush()
+    return player
+''',
+"database/repositories/missions.py": r'''from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from database.models import Mission, MissionPlayer, Stage
+
+
+async def get_mission(
+    session: AsyncSession, mission_id: int
+) -> Mission | None:
+    result = await session.execute(
+        select(Mission).where(Mission.id == mission_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_stage(
+    session: AsyncSession, stage_id: int
+) -> Stage | None:
+    result = await session.execute(
+        select(Stage).where(Stage.id == stage_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def join_mission(
+    session: AsyncSession, mission_id: int, player_id: int
+) -> MissionPlayer:
+    result = await session.execute(
+        select(MissionPlayer).where(
+            MissionPlayer.mission_id == mission_id,
+            MissionPlayer.player_id == player_id,
         )
-
-    await callback.message.edit_text(text, reply_markup=main_menu())
-
-
-@router.callback_query(F.data == "rating")
-async def rating(callback: CallbackQuery) -> None:
-    await callback.answer()
-    users = await get_top_users()
-
-    if not users:
-        text = "🏆 <b>Рейтинг</b>\n\nПока здесь никого нет."
-    else:
-        lines = ["🏆 <b>Рейтинг</b>\n"]
-        for index, (_, username, first_name, points) in enumerate(users, 1):
-            name = f"@{username}" if username else (first_name or "Игрок")
-            lines.append(f"{index}. {name} — ⭐ {points}")
-        text = "\n".join(lines)
-
-    await callback.message.edit_text(text, reply_markup=main_menu())
-
-
-@router.callback_query(F.data == "rules")
-async def rules(callback: CallbackQuery) -> None:
-    await callback.answer()
-    await callback.message.edit_text(
-        "📜 <b>Правила</b>\n\n"
-        "1. Выполняй доступные миссии.\n"
-        "2. Следуй условиям каждой миссии.\n"
-        "3. Не используй запрещённые способы выполнения.\n"
-        "4. За выполнение миссий начисляются очки.\n\n"
-        "Подробные правила добавим вместе с игровой механикой.",
-        reply_markup=main_menu(),
     )
+    link = result.scalar_one_or_none()
+
+    if link is None:
+        link = MissionPlayer(
+            mission_id=mission_id,
+            player_id=player_id,
+        )
+        session.add(link)
+        await session.flush()
+
+    return link
+''',
+"database/repositories/clues.py": r'''from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from database.models import Clue
 
 
-@router.callback_query(F.data == "chat")
-async def chat(callback: CallbackQuery) -> None:
-    await callback.answer()
-    await callback.message.edit_text(
-        "💬 <b>Чат</b>\n\n"
-        "Ссылка на чат будет добавлена позже.",
-        reply_markup=main_menu(),
+async def get_player_clues(
+    session: AsyncSession,
+    player_id: int,
+    stage_id: int | None = None,
+) -> list[Clue]:
+    query = select(Clue).where(Clue.owner_player_id == player_id)
+
+    if stage_id is not None:
+        query = query.where(Clue.stage_id == stage_id)
+
+    query = query.order_by(Clue.id)
+
+    result = await session.execute(query)
+    return list(result.scalars().all())
+''',
+"database/repositories/interactions.py": r'''from datetime import datetime
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from database.models import (
+    Interaction,
+    InteractionAction,
+    InteractionStatus,
+)
+
+
+async def create_interaction(
+    session: AsyncSession,
+    mission_id: int,
+    stage_id: int,
+    initiator_id: int,
+    target_id: int,
+    interaction_type: str,
+) -> Interaction:
+    interaction = Interaction(
+        mission_id=mission_id,
+        stage_id=stage_id,
+        initiator_id=initiator_id,
+        target_id=target_id,
+        interaction_type=interaction_type,
+        status=InteractionStatus.PENDING.value,
     )
+    session.add(interaction)
+    await session.flush()
+    return interaction
+
+
+async def add_action(
+    session: AsyncSession,
+    interaction_id: int,
+    player_id: int,
+    action_type: str,
+    payload: str | None = None,
+) -> InteractionAction:
+action = InteractionAction(
+        interaction_id=interaction_id,
+        player_id=player_id,
+        action_type=action_type,
+        payload=payload,
+    )
+    session.add(action)
+    await session.flush()
+    return action
+
+
+async def complete_interaction(
+    session: AsyncSession,
+    interaction_id: int,
+    result_text: str,
+    branch: str | None = None,
+) -> Interaction | None:
+    result = await session.execute(
+        select(Interaction).where(Interaction.id == interaction_id)
+    )
+    interaction = result.scalar_one_or_none()
+
+    if interaction is None:
+        return None
+
+    interaction.status = InteractionStatus.COMPLETED.value
+    interaction.result = result_text
+    interaction.branch = branch
+    interaction.finished_at = datetime.utcnow()
+
+    await session.flush()
+    return interaction
 ''',
-
-".env.example": r'''BOT_TOKEN=YOUR_TELEGRAM_BOT_TOKEN
-ADMIN_ID=YOUR_TELEGRAM_ID
-DATABASE_URL=sqlite:///ohota.db
-BETA_MODE=true
+".env.example": r'''BOT_TOKEN=
+ADMIN_ID=
+DATABASE_URL=sqlite+aiosqlite:///./data/ohota_v2.db
+BETA_MODE=false
 ''',
+"requirements-v2.txt": r'''aiogram>=3.30,<4.0
+aiohttp>=3.8,<4.0
+SQLAlchemy>=2.0,<3.0
+aiosqlite>=0.20,<1.0
 
-".gitignore": r'''__pycache__/
-*.py[cod]
-*.db
-.env
-.venv/
-venv/
-.idea/
-.vscode/
-.DS_Store
+# For PostgreSQL on the future VPS:
+# asyncpg>=0.29,<1.0
 ''',
+"README_V2_FOUNDATION.md": r'''# OhotaGameBot V2 — Foundation
 
-"requirements.txt": r'''aiogram>=3.22,<4
-aiosqlite>=0.21,<1
-python-dotenv>=1.1,<2
-''',
+This folder is a new foundation layer. The existing bot is intentionally not replaced.
 
-"README.md": r'''# OhotaGameBot
+## What is included
 
-Чистая базовая версия Telegram-бота на Python + aiogram 3.
+- environment-based configuration
+- async SQLAlchemy database layer
+- SQLite for free/local development
+- PostgreSQL-compatible architecture
+- players
+- missions
+- stages
+- mission participants
+- personal clues
+- player-to-player interactions
+- interaction actions
+- score/XP event history
+- persistent game state
 
-## Что уже есть
+## Run locally
 
-- `/start`
-- главное меню
-- 🕵️ Начать
-- 🎯 Миссии
-- 👤 Мой профиль
-- 🏆 Рейтинг
-- 📜 Правила
-- 💬 Чат
-- SQLite база пользователей
-- настройки через `.env`
+1. Copy .env.example to .env.
+2. Set BOT_TOKEN and ADMIN_ID.
+3. Install requirements-v2.txt.
+4. Import settings only after environment variables are available.
+5. Call await init_db() during application startup.
 
-## Запуск
-
-1. Установить Python 3.11+.
-2. Установить зависимости:
-
-```bash
-pip install -r requirements.txt
-```
-
-3. Скопировать `.env.example` в `.env`.
-4. Заполнить `BOT_TOKEN` и `ADMIN_ID`.
-5. Запустить:
-
-```bash
-python main.py
-```
-
-## Важно
-
-Файл `.env` не загружается в GitHub. Токен бота хранится только в переменных окружения.
-''',
+The old main.py is not replaced by this foundation.
+'''
 }
 
 for rel, content in files.items():
-    path = root / rel
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    p = root / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(textwrap.dedent(content).lstrip(), encoding="utf-8")
 
-zip_path = Path("/mnt/data/ohota_game_bot_new.zip")
+zip_path = Path("/mnt/data/ohota_v2_foundation.zip")
 with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
-    for path in root.rglob("*"):
-        if path.is_file():
-            z.write(path, path.relative_to(root))
+    for p in root.rglob("*"):
+        if p.is_file():
+            z.write(p, p.relative_to(root))
 
-print(f"Готово: {zip_path}")
+print(f"Создан пакет: {zip_path}")
 print("Файлов:", len(files))
+
