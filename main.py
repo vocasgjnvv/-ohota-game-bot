@@ -275,41 +275,38 @@ async def create_mission_start(message: Message):
         "➕ <b>СОЗДАНИЕ МИССИИ</b>\n\n"
         "Напиши название новой миссии."
     )
+    
 @dp.message()
-async def mission_creation_title_handler(message: Message):
+async def mission_creation_handler(message: Message):
     user_id = message.from_user.id
-
-    if user_id not in mission_creation:
-        return
 
     if user_id != ADMIN_ID:
         return
 
-    mission_creation[user_id]["title"] = message.text
-
-    await message.answer(
-        "📄 <b>ОПИСАНИЕ МИССИИ</b>\n\n"
-        "Теперь напиши описание новой миссии."
-    )
-    
-@dp.message()
-async def mission_creation_description_handler(message: Message):
-    user_id = message.from_user.id
-
     if user_id not in mission_creation:
         return
 
-    if user_id != ADMIN_ID:
+    data = mission_creation[user_id]
+
+    if "title" not in data:
+        data["title"] = message.text
+
+        await message.answer(
+            "📄 <b>ОПИСАНИЕ МИССИИ</b>\n\n"
+            "Теперь напиши описание новой миссии."
+        )
         return
 
-    mission_creation[user_id]["description"] = message.text
+    if "description" not in data:
+        data["description"] = message.text
 
-    await message.answer(
-        "⚡ <b>НАГРАДА XP</b>\n\n"
-        "Напиши количество опыта за выполнение миссии.\n\n"
-        "Например: <b>100</b>"
-    )
-    
+        await message.answer(
+            "⚡ <b>НАГРАДА XP</b>\n\n"
+            "Напиши количество опыта за выполнение миссии.\n\n"
+            "Например: <b>100</b>"
+        )
+        return
+        
 @dp.message(F.text == "🎯 Миссии")
 async def missions_handler(message: Message):
     connection = sqlite3.connect(DB_FILE)
