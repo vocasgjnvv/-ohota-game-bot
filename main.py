@@ -17,6 +17,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN не задан")
 
+ADMIN_ID = 5169764277
 
 DB_FILE = "ohota.db"
 
