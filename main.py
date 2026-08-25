@@ -262,6 +262,16 @@ async def admin_panel_handler(message: Message):
         "Выбери нужный раздел:",
         reply_markup=admin_panel_menu,
     )
+@dp.message(F.text == "➕ Создать миссию")
+async def create_mission_start(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ У тебя нет доступа.")
+        return
+
+    await message.answer(
+        "➕ <b>СОЗДАНИЕ МИССИИ</b>\n\n"
+        "Напиши название новой миссии."
+    )
 @dp.message(F.text == "🎯 Миссии")
 async def missions_handler(message: Message):
     connection = sqlite3.connect(DB_FILE)
