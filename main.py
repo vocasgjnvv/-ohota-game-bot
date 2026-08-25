@@ -392,12 +392,30 @@ async def complete_mission_handler(callback):
 async def profile_handler(message: Message):
     player = get_or_create_player(message)
 
+    connection = sqlite3.connect(DB_FILE)
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        SELECT COUNT(*)
+        FROM mission_participants
+        WHERE telegram_id = ?
+          AND status = 'completed'
+        """,
+        (message.from_user.id,),
+    )
+
+    completed_missions = cursor.fetchone()[0]
+
+    connection.close()
+
     await message.answer(
         "👤 <b>МОЙ ПРОФИЛЬ</b>\n\n"
         f"🆔 ID: <code>{message.from_user.id}</code>\n"
         f"👤 Имя: <b>{message.from_user.first_name or 'Не указано'}</b>\n"
         f"⭐ Очки: <b>{player[2]}</b>\n"
-        f"⚡ Опыт: <b>{player[1]}</b>"
+        f"⚡ Опыт: <b>{player[1]}</b>\n"
+        f"🎯 Выполнено миссий: <b>{completed_missions}</b>"
     )
 @dp.message(F.text == "🏆 Рейтинг")
 async def rating_handler(message: Message):
