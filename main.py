@@ -8,6 +8,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from quest_service import QuestService
 
 
 logging.basicConfig(level=logging.INFO)
@@ -21,6 +22,7 @@ ADMIN_ID = 5169764277
 
 DB_FILE = "ohota.db"
 mission_creation = {}
+quest_service = QuestService(DB_FILE)
 
 dp = Dispatcher()
 main_menu = ReplyKeyboardMarkup(
