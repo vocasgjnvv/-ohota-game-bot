@@ -20,6 +20,7 @@ if not BOT_TOKEN:
 ADMIN_ID = 5169764277
 
 DB_FILE = "ohota.db"
+mission_creation = {}
 
 dp = Dispatcher()
 main_menu = ReplyKeyboardMarkup(
@@ -267,6 +268,8 @@ async def create_mission_start(message: Message):
     if message.from_user.id != ADMIN_ID:
         await message.answer("⛔ У тебя нет доступа.")
         return
+        
+    mission_creation[message.from_user.id] = {}
 
     await message.answer(
         "➕ <b>СОЗДАНИЕ МИССИИ</b>\n\n"
