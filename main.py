@@ -578,7 +578,17 @@ async def admin_handler(message: Message):
         "👑 <b>АДМИН-ПАНЕЛЬ</b>\n\n"
         "Доступ разрешён."
     )
-    
+@dp.callback_query(F.data == "cancel_create_mission")
+async def cancel_create_mission_handler(callback):
+    user_id = callback.from_user.id
+
+    mission_creation.pop(user_id, None)
+
+    await callback.answer("❌ Создание миссии отменено.")
+
+    await callback.message.answer(
+        "❌ <b>СОЗДАНИЕ МИССИИ ОТМЕНЕНО</b>"
+    )
 @dp.message()
 async def mission_creation_handler(message: Message):
     user_id = message.from_user.id
