@@ -589,6 +589,56 @@ async def cancel_create_mission_handler(callback):
     await callback.message.answer(
         "❌ <b>СОЗДАНИЕ МИССИИ ОТМЕНЕНО</b>"
     )
+@dp.callback_query(F.data == "confirm_create_mission")
+async def confirm_create_mission_handler(callback):
+    user_id = callback.from_user.id
+
+    if user_id != ADMIN_ID:
+        await callback.answer("⛔ Нет доступа.", show_alert=True)
+        return
+
+    if user_id not in mission_creation:
+        await callback.answer(
+            "❌ Данные миссии не найдены.",
+            show_alert=True
+        )
+        return
+
+    data = mission_creation[user_id]
+
+    connection = sqlite3.connect(DB_FILE)
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        INSERT INTO missions
+        (title, description, reward_xp, reward_score, active)
+        VALUES (?, ?, ?, ?, 1)
+        """,
+        (
+            data["title"],
+            data["description"],
+            data["reward_xp"],
+            data["reward_score"],
+        ),
+    )
+
+    connection.commit()
+    mission_id = cursor.lastrowid
+    connection.close()
+
+    mission_creation.pop(user_id, None)
+
+    await callback.answer("✅ Миссия создана!")
+
+    await callback.message.answer(
+        "🎯 <b>МИССИЯ СОЗДАНА!</b>\n\n"
+        f"🆔 №{mission_id}\n"
+        f"🎯 <b>{data['title']}</b>\n"
+        f"📄 {data['description']}\n\n"
+        f"⚡ XP: <b>{data['reward_xp']}</b>\n"
+        f"⭐ Очки: <b>{data['reward_score']}</b>"
+    )
 @dp.message()
 async def mission_creation_handler(message: Message):
     user_id = message.from_user.id
