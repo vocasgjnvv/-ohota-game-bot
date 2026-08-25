@@ -232,6 +232,16 @@ async def start_handler(message: Message):
         f"🎯 Скоро здесь появятся первые миссии.",
         reply_markup=current_menu,
         )
+@dp.message(F.text == "👑 Админ-панель")
+async def admin_panel_handler(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ У тебя нет доступа.")
+        return
+
+    await message.answer(
+        "👑 <b>АДМИН-ПАНЕЛЬ</b>\n\n"
+        "Выбери нужный раздел:"
+    )
 @dp.message(F.text == "🎯 Миссии")
 async def missions_handler(message: Message):
     connection = sqlite3.connect(DB_FILE)
