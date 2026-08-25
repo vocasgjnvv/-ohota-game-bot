@@ -634,6 +634,33 @@ async def mission_creation_handler(message: Message):
             "Например: <b>50</b>"
         )
         return
+    if "reward_score" not in data:
+        try:
+            reward_score = int(message.text)
+        except ValueError:
+            await message.answer(
+                "❌ Введи число.\n\n"
+                "Например: <b>50</b>"
+            )
+            return
+
+        if reward_score < 0:
+            await message.answer(
+                "❌ Очки не могут быть отрицательными."
+            )
+            return
+
+        data["reward_score"] = reward_score
+
+        await message.answer(
+            "✅ <b>ДАННЫЕ МИССИИ СОБРАНЫ</b>\n\n"
+            f"🎯 Название: <b>{data['title']}</b>\n"
+            f"📄 Описание: {data['description']}\n\n"
+            f"⚡ XP: <b>{data['reward_xp']}</b>\n"
+            f"⭐ Очки: <b>{data['reward_score']}</b>\n\n"
+            "Следующий шаг — подтверждение создания."
+        )
+        return
         
 @dp.message()
 async def message_handler(message: Message):
