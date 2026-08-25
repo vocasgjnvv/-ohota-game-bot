@@ -222,5 +222,6 @@ class ChapterDatabase:
                 WHERE chapter_id = ?
                   AND is_start = 1
                 LIMIT 1
-                """
+                """,
+                (chapter_id,),
             ).fetchone()
