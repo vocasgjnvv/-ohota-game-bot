@@ -39,8 +39,47 @@ main_menu = ReplyKeyboardMarkup(
     ],
     resize_keyboard=True,
 )
+admin_menu = ReplyKeyboardMarkup(
+    keyboard=[
+        [
+            KeyboardButton(text="🕵️ Начать"),
+            KeyboardButton(text="🎯 Миссии"),
+        ],
+        [
+            KeyboardButton(text="👤 Мой профиль"),
+            KeyboardButton(text="🏆 Рейтинг"),
+        ],
+        [
+            KeyboardButton(text="📜 Правила"),
+            KeyboardButton(text="💬 Чат"),
+        ],
+        [
+            KeyboardButton(text="👑 Админ-панель"),
+        ],
+    ],
+    resize_keyboard=True,
+)
 
-
+admin_menu = ReplyKeyboardMarkup(
+    keyboard=[
+        [
+            KeyboardButton(text="🕵️ Начать"),
+            KeyboardButton(text="🎯 Миссии"),
+        ],
+        [
+            KeyboardButton(text="👤 Мой профиль"),
+            KeyboardButton(text="🏆 Рейтинг"),
+        ],
+        [
+            KeyboardButton(text="📜 Правила"),
+            KeyboardButton(text="💬 Чат"),
+        ],
+        [
+            KeyboardButton(text="👑 Админ-панель"),
+        ],
+    ],
+    resize_keyboard=True,
+)
 def init_db():
     connection = sqlite3.connect(DB_FILE)
 
