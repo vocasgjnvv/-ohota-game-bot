@@ -276,8 +276,6 @@ async def create_mission_start(message: Message):
         "➕ <b>СОЗДАНИЕ МИССИИ</b>\n\n"
         "Напиши название новой миссии."
     )
-    
- 
         
 @dp.message(F.text == "🎯 Миссии")
 async def missions_handler(message: Message):
