@@ -477,7 +477,18 @@ async def chat_handler(message: Message):
         "Скоро здесь появится ссылка на чат ОХОТЫ."
     )
     
+@dp.message(Command("admin"))
+async def admin_handler(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer(
+            "⛔ У тебя нет доступа к админ-панели."
+        )
+        return
 
+    await message.answer(
+        "👑 <b>АДМИН-ПАНЕЛЬ</b>\n\n"
+        "Доступ разрешён."
+    )
 @dp.message()
 async def message_handler(message: Message):
     await message.answer(
