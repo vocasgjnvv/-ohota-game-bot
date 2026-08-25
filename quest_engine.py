@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 
 @dataclass
@@ -7,7 +7,6 @@ class Choice:
     text: str
     next_scene_id: str
     points: int = 0
-    correct: bool = False
 
 
 @dataclass
@@ -15,9 +14,13 @@ class Scene:
     scene_id: str
     text: str
     choices: List[Choice] = field(default_factory=list)
-    input_answer: Optional[str] = None
-    input_next_scene_id: Optional[str] = None
-    input_points: int = 0
+
+    # Если здесь задан ответ — игрок должен написать его текстом.
+    accepted_answers: Set[str] = field(default_factory=set)
+    answer_next_scene_id: Optional[str] = None
+    answer_points: int = 0
+
+    # Если True — эта сцена заканчивает миссию.
     finish_mission: bool = False
 
 
@@ -36,17 +39,38 @@ class PlayerProgress:
     score: int = 0
     completed: bool = False
 
+    # Уже использованные действия.
+    # Нужны, чтобы за одно и то же действие
+    # нельзя было получать очки бесконечно.
+    completed_actions: Set[str] = field(default_factory=set)
+
 
 class QuestEngine:
+    """
+    Движок квеста.
+
+    Здесь нет Telegram-кода и нет конкретного сюжета.
+    Он отвечает только за механику игры:
+    миссии -> сцены -> выборы/ответы -> переходы -> очки.
+    """
+
     def __init__(self):
         self.missions: Dict[int, Mission] = {}
         self.players: Dict[int, PlayerProgress] = {}
 
-    # -------------------------
+    # =========================================================
     # МИССИИ
-    # -------------------------
+    # =========================================================
 
-    def create_mission(self, mission_id: int, title: str) -> Mission:
+    def create_mission(
+        self,
+        mission_id: int,
+        title: str,
+    ) -> Mission:
+
+        if mission_id in self.missions:
+            raise ValueError("Такая миссия уже существует.")
+
         mission = Mission(
             mission_id=mission_id,
             title=title,
@@ -56,12 +80,16 @@ class QuestEngine:
 
         return mission
 
-    def get_mission(self, mission_id: int) -> Optional[Mission]:
+    def get_mission(
+        self,
+        mission_id: int,
+    ) -> Optional[Mission]:
+
         return self.missions.get(mission_id)
 
-    # -------------------------
+    # =========================================================
     # СЦЕНЫ
-    # -------------------------
+    # =========================================================
 
     def add_scene(
         self,
@@ -72,10 +100,10 @@ class QuestEngine:
         finish_mission: bool = False,
     ) -> Scene:
 
-        mission = self.missions.get(mission_id)
+        mission = self._get_mission(mission_id)
 
-        if mission is None:
-            raise ValueError("Миссия не найдена.")
+        if scene_id in mission.scenes:
+            raise ValueError("Такая сцена уже существует.")
 
         scene = Scene(
             scene_id=scene_id,
@@ -90,9 +118,9 @@ class QuestEngine:
 
         return scene
 
-    # -------------------------
-    # ВАРИАНТЫ
-    # -------------------------
+    # =========================================================
+    # ВЕТВЛЕНИЯ
+    # =========================================================
 
     def add_choice(
         self,
@@ -101,42 +129,68 @@ class QuestEngine:
         text: str,
         next_scene_id: str,
         points: int = 0,
-        correct: bool = False,
-    ):
+    ) -> None:
 
-        scene = self._get_scene(mission_id, scene_id)
+        scene = self._get_scene(
+            mission_id,
+            scene_id,
+        )
+
+        # Проверяем, что следующая сцена действительно существует.
+        self._get_scene(
+            mission_id,
+            next_scene_id,
+        )
 
         scene.choices.append(
             Choice(
                 text=text,
                 next_scene_id=next_scene_id,
                 points=points,
-                correct=correct,
             )
         )
 
-    # -------------------------
-    # СВОБОДНЫЙ ОТВЕТ
-    # -------------------------
+    # =========================================================
+    # СВОБОДНЫЕ ОТВЕТЫ
+    # =========================================================
 
-    def set_answer(
+    def set_answers(
         self,
         mission_id: int,
         scene_id: str,
-        answer: str,
+        accepted_answers: List[str],
         next_scene_id: str,
         points: int = 0,
-    ):
+    ) -> None:
 
-        scene = self._get_scene(mission_id, scene_id)
+        scene = self._get_scene(
+            mission_id,
+            scene_id,
+        )
 
-        scene.input_answer = answer.strip().lower()
-        scene.input_next_scene_id = next_scene_id
-        scene.input_points = points
+        self._get_scene(
+            mission_id,
+            next_scene_id,
+        )
 
-    # -------------------------
+        cleaned_answers = {
+            self._normalize_answer(answer)
+            for answer in accepted_answers
+            if answer.strip()
+        }
+
+        if not cleaned_answers:
+            raise ValueError(
+                "Нужно указать хотя бы один правильный ответ."
+            )
+
+        scene.accepted_answers = cleaned_answers
+        scene.answer_next_scene_id = next_scene_id
+        scene.answer_points = points
+
+    # =========================================================
     # НАЧАЛО МИССИИ
-    # -------------------------
+    # =========================================================
 
     def start_mission(
         self,
@@ -144,13 +198,12 @@ class QuestEngine:
         mission_id: int,
     ) -> Scene:
 
-        mission = self.missions.get(mission_id)
-
-        if mission is None:
-            raise ValueError("Миссия не найдена.")
+        mission = self._get_mission(mission_id)
 
         if mission.start_scene_id is None:
-            raise ValueError("У миссии нет стартовой сцены.")
+            raise ValueError(
+                "У миссии нет стартовой сцены."
+            )
 
         progress = PlayerProgress(
             mission_id=mission_id,
@@ -161,9 +214,9 @@ class QuestEngine:
 
         return mission.scenes[mission.start_scene_id]
 
-    # -------------------------
+    # =========================================================
     # ТЕКУЩАЯ СЦЕНА
-    # -------------------------
+    # =========================================================
 
     def get_current_scene(
         self,
@@ -175,16 +228,20 @@ class QuestEngine:
         if progress is None:
             return None
 
-        mission = self.missions.get(progress.mission_id)
+        mission = self.missions.get(
+            progress.mission_id
+        )
 
         if mission is None:
             return None
 
-        return mission.scenes.get(progress.scene_id)
+        return mission.scenes.get(
+            progress.scene_id
+        )
 
-    # -------------------------
-    # ВЫБОР КНОПКИ
-    # -------------------------
+    # =========================================================
+    # ВЫБОР ВАРИАНТА
+    # =========================================================
 
     def choose(
         self,
@@ -192,27 +249,54 @@ class QuestEngine:
         choice_index: int,
     ) -> Scene:
 
-        progress = self._get_progress(telegram_id)
+        progress = self._get_progress(
+            telegram_id
+        )
+
         scene = self._get_scene(
             progress.mission_id,
             progress.scene_id,
         )
 
-        if choice_index < 0 or choice_index >= len(scene.choices):
-            raise ValueError("Такого варианта нет.")
+        if progress.completed:
+            raise ValueError(
+                "Миссия уже завершена."
+            )
+
+        if (
+            choice_index < 0
+            or choice_index >= len(scene.choices)
+        ):
+            raise ValueError(
+                "Такого варианта нет."
+            )
 
         choice = scene.choices[choice_index]
 
-        progress.score += choice.points
+        action_id = (
+            f"choice:"
+            f"{progress.mission_id}:"
+            f"{progress.scene_id}:"
+            f"{choice_index}"
+        )
+
+        # Одно и то же действие повторно очки не даёт.
+        if action_id not in progress.completed_actions:
+
+            progress.score += choice.points
+
+            progress.completed_actions.add(
+                action_id
+            )
 
         return self._move_to_scene(
             progress,
             choice.next_scene_id,
         )
 
-    # -------------------------
+    # =========================================================
     # ТЕКСТОВЫЙ ОТВЕТ
-    # -------------------------
+    # =========================================================
 
     def answer(
         self,
@@ -220,59 +304,158 @@ class QuestEngine:
         answer: str,
     ) -> Scene:
 
-        progress = self._get_progress(telegram_id)
+        progress = self._get_progress(
+            telegram_id
+        )
 
         scene = self._get_scene(
             progress.mission_id,
             progress.scene_id,
         )
 
-        if scene.input_answer is None:
+        if progress.completed:
+            raise ValueError(
+                "Миссия уже завершена."
+            )
+
+        if not scene.accepted_answers:
             raise ValueError(
                 "На этой сцене нет текстового ответа."
             )
 
-        user_answer = answer.strip().lower()
+        normalized_answer = (
+            self._normalize_answer(answer)
+        )
 
-        if user_answer != scene.input_answer:
-            raise ValueError("Неверный ответ.")
+        if normalized_answer not in scene.accepted_answers:
+            raise ValueError(
+                "Неверный ответ."
+            )
 
-        progress.score += scene.input_points
+        action_id = (
+            f"answer:"
+            f"{progress.mission_id}:"
+            f"{progress.scene_id}"
+        )
+
+        if action_id not in progress.completed_actions:
+
+            progress.score += scene.answer_points
+
+            progress.completed_actions.add(
+                action_id
+            )
 
         return self._move_to_scene(
             progress,
-            scene.input_next_scene_id,
+            scene.answer_next_scene_id,
         )
 
-    # -------------------------
+    # =========================================================
     # ОЧКИ
-    # -------------------------
+    # =========================================================
 
-    def get_score(self, telegram_id: int) -> int:
+    def get_score(
+        self,
+        telegram_id: int,
+    ) -> int:
 
-        progress = self.players.get(telegram_id)
+        progress = self.players.get(
+            telegram_id
+        )
 
         if progress is None:
             return 0
 
         return progress.score
 
-    # -------------------------
+    # =========================================================
+    # ПРОГРЕСС
+    # =========================================================
+
+    def get_progress(
+        self,
+        telegram_id: int,
+    ) -> Optional[PlayerProgress]:
+
+        return self.players.get(
+            telegram_id
+        )
+
+    # =========================================================
     # ЗАВЕРШЕНИЕ
-    # -------------------------
+    # =========================================================
 
-    def is_completed(self, telegram_id: int) -> bool:
+    def is_completed(
+        self,
+        telegram_id: int,
+    ) -> bool:
 
-        progress = self.players.get(telegram_id)
+        progress = self.players.get(
+            telegram_id
+        )
 
         if progress is None:
             return False
 
         return progress.completed
 
-    # -------------------------
+    # =========================================================
     # ВНУТРЕННИЕ МЕТОДЫ
-    # -------------------------
+    # =========================================================
+
+    def _get_mission(
+        self,
+        mission_id: int,
+    ) -> Mission:
+
+        mission = self.missions.get(
+            mission_id
+        )
+
+        if mission is None:
+            raise ValueError(
+                "Миссия не найдена."
+            )
+
+        return mission
+
+    def _get_scene(
+        self,
+        mission_id: int,
+        scene_id: str,
+    ) -> Scene:
+
+        mission = self._get_mission(
+            mission_id
+        )
+
+        scene = mission.scenes.get(
+            scene_id
+        )
+
+        if scene is None:
+            raise ValueError(
+                "Сцена не найдена."
+            )
+
+        return scene
+
+    def _get_progress(
+        self,
+        telegram_id: int,
+    ) -> PlayerProgress:
+
+        progress = self.players.get(
+            telegram_id
+        )
+
+        if progress is None:
+            raise ValueError(
+                "Игрок ещё не начал миссию."
+            )
+
+        return progress
 
     def _move_to_scene(
         self,
@@ -280,16 +463,20 @@ class QuestEngine:
         next_scene_id: Optional[str],
     ) -> Scene:
 
+        mission = self._get_mission(
+            progress.mission_id
+        )
+
         if next_scene_id is None:
             progress.completed = True
 
-            mission = self.missions[progress.mission_id]
+            return mission.scenes[
+                progress.scene_id
+            ]
 
-            return mission.scenes[progress.scene_id]
-
-        mission = self.missions[progress.mission_id]
-
-        next_scene = mission.scenes.get(next_scene_id)
+        next_scene = mission.scenes.get(
+            next_scene_id
+        )
 
         if next_scene is None:
             raise ValueError(
@@ -303,34 +490,11 @@ class QuestEngine:
 
         return next_scene
 
-    def _get_progress(
-        self,
-        telegram_id: int,
-    ) -> PlayerProgress:
+    @staticmethod
+    def _normalize_answer(
+        answer: str,
+    ) -> str:
 
-        progress = self.players.get(telegram_id)
-
-        if progress is None:
-            raise ValueError(
-                "Игрок ещё не начал миссию."
-            )
-
-        return progress
-
-    def _get_scene(
-        self,
-        mission_id: int,
-        scene_id: str,
-    ) -> Scene:
-
-        mission = self.missions.get(mission_id)
-
-        if mission is None:
-            raise ValueError("Миссия не найдена.")
-
-        scene = mission.scenes.get(scene_id)
-
-        if scene is None:
-            raise ValueError("Сцена не найдена.")
-
-        return scene
+        return " ".join(
+            answer.strip().lower().split()
+        )
