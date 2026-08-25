@@ -309,71 +309,85 @@ async def complete_mission_handler(callback):
 
     cursor.execute(
         """
-        UPDATE mission_participants
-        SET status = 'completed'
-        WHERE mission_id = ?
-          AND telegram_id = ?
-          AND status = 'joined'
+        SELECT status, reward_given
+        FROM mission_participants
+        WHERE mission_id = ? AND telegram_id = ?
         """,
         (mission_id, telegram_id),
     )
 
-    updated = cursor.rowcount
+    participation = cursor.fetchone()
+
+    if not participation:
+        connection.close()
+        await callback.answer("❌ Ты не участвуешь в этой миссии.")
+        return
+
+    status, reward_given = participation
+
+    if reward_given:
+        connection.close()
+        await callback.answer("ℹ️ Награда уже была получена.")
+        return
+
+    if status != "completed":
+        cursor.execute(
+            """
+            UPDATE mission_participants
+            SET status = 'completed'
+            WHERE mission_id = ? AND telegram_id = ?
+            """,
+            (mission_id, telegram_id),
+        )
+
+    cursor.execute(
+        """
+        SELECT reward_xp, reward_score
+        FROM missions
+        WHERE id = ?
+        """,
+        (mission_id,),
+    )
+
+    reward = cursor.fetchone()
+
+    if not reward:
+        connection.close()
+        await callback.answer("❌ Миссия не найдена.")
+        return
+
+    reward_xp, reward_score = reward
+
+    cursor.execute(
+        """
+        UPDATE players
+        SET xp = xp + ?,
+            score = score + ?
+        WHERE telegram_id = ?
+        """,
+        (reward_xp, reward_score, telegram_id),
+    )
+
+    cursor.execute(
+        """
+        UPDATE mission_participants
+        SET reward_given = 1,
+            status = 'completed'
+        WHERE mission_id = ? AND telegram_id = ?
+        """,
+        (mission_id, telegram_id),
+    )
 
     connection.commit()
     connection.close()
 
-    if updated:
-        connection = sqlite3.connect(DB_FILE)
-        cursor = connection.cursor()
+    await callback.answer("🎁 Награда получена!")
 
-        cursor.execute(
-            """
-            SELECT reward_xp, reward_score
-            FROM missions
-            WHERE id = ?
-            """,
-            (mission_id,),
-        )
-
-        reward = cursor.fetchone()
-
-        if reward:
-            reward_xp, reward_score = reward
-
-            cursor.execute(
-                """
-                UPDATE players
-                SET xp = xp + ?, score = score + ?
-                WHERE telegram_id = ?
-                """,
-                (reward_xp, reward_score, telegram_id),
-            )
-
-            cursor.execute(
-                """
-                UPDATE mission_participants
-                SET reward_given = 1
-                WHERE mission_id = ?
-                  AND telegram_id = ?
-                """,
-                (mission_id, telegram_id),
-            )
-
-            connection.commit()
-
-        connection.close()
-
-        await callback.answer("🎁 Награда получена!")
-        await callback.message.answer(
-            "🏁 <b>МИССИЯ ВЫПОЛНЕНА!</b>\n\n"
-            f"⚡ XP: <b>+{reward_xp}</b>\n"
-            f"⭐ Очки: <b>+{reward_score}</b>"
-        )
-    else:
-        await callback.answer(
-            "ℹ️ Миссия уже выполнена или ты не участвуешь."
-        )
+    await callback.message.answer(
+        "🏁 <b>МИССИЯ ВЫПОЛНЕНА!</b>\n\n"
+        f"⚡ XP: <b>+{reward_xp}</b>\n"
+        f"⭐ Очки: <b>+{reward_score}</b>"
+    )
 @dp.message(F.text == "👤 Мой профиль")
 async def profile_handler(message: Message):
     player = get_or_create_player(message)
