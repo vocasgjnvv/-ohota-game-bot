@@ -652,14 +652,52 @@ async def mission_creation_handler(message: Message):
 
         data["reward_score"] = reward_score
 
-        await message.answer(
-            "✅ <b>ДАННЫЕ МИССИИ СОБРАНЫ</b>\n\n"
-            f"🎯 Название: <b>{data['title']}</b>\n"
-            f"📄 Описание: {data['description']}\n\n"
-            f"⚡ XP: <b>{data['reward_xp']}</b>\n"
-            f"⭐ Очки: <b>{data['reward_score']}</b>\n\n"
-            "Следующий шаг — подтверждение создания."
+        keyboard = InlineKeyboardMarkup(
+
+            inline_keyboard=[
+
+                [
+
+                    InlineKeyboardButton(
+
+                        text="✅ Создать миссию",
+
+                        callback_data="confirm_create_mission"
+
+                    ),
+
+                    InlineKeyboardButton(
+
+                        text="❌ Отмена",
+
+                        callback_data="cancel_create_mission"
+
+                    )
+
+                ]
+
+            ]
+
         )
+
+        await message.answer(
+
+            "✅ <b>ДАННЫЕ МИССИИ СОБРАНЫ</b>\n\n"
+
+            f"🎯 Название: <b>{data['title']}</b>\n"
+
+            f"📄 Описание: {data['description']}\n\n"
+
+            f"⚡ XP: <b>{data['reward_xp']}</b>\n"
+
+            f"⭐ Очки: <b>{data['reward_score']}</b>\n\n"
+
+            "Подтвердить создание миссии?",
+
+            reply_markup=keyboard
+
+        )
+
         return
         
 @dp.message()
