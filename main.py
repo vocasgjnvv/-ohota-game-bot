@@ -259,7 +259,8 @@ async def admin_panel_handler(message: Message):
 
     await message.answer(
         "👑 <b>АДМИН-ПАНЕЛЬ</b>\n\n"
-        "Выбери нужный раздел:"
+        "Выбери нужный раздел:",
+        reply_markup=admin_panel_menu,
     )
 @dp.message(F.text == "🎯 Миссии")
 async def missions_handler(message: Message):
