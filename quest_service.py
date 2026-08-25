@@ -556,3 +556,36 @@ class QuestService:
         return " ".join(
             answer.strip().lower().split()
         )
+    
+    def get_mission_statuses(self, telegram_id: int):
+        missions = self.db.get_all_missions()
+        statuses = []
+
+        current_unlocked_found = False
+
+        for mission in missions:
+            progress = self.db.get_progress(
+                telegram_id,
+                mission["id"],
+            )
+
+            if progress and progress["completed"]:
+                status = "completed"
+
+            elif not current_unlocked_found:
+                status = "current"
+                current_unlocked_found = True
+
+            else:
+                status = "locked"
+
+            statuses.append(
+                {
+                    "id": mission["id"],
+                    "title": mission["title"],
+                    "description": mission["description"],
+                    "status": status,
+                }
+            )
+
+        return statuses
