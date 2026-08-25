@@ -59,6 +59,25 @@ admin_menu = ReplyKeyboardMarkup(
     ],
     resize_keyboard=True,
 )
+admin_panel_menu = ReplyKeyboardMarkup(
+    keyboard=[
+        [
+            KeyboardButton(text="➕ Создать миссию"),
+            KeyboardButton(text="📋 Все миссии"),
+        ],
+        [
+            KeyboardButton(text="👥 Участники"),
+            KeyboardButton(text="📊 Статистика"),
+        ],
+        [
+            KeyboardButton(text="💬 Поддержка"),
+        ],
+        [
+            KeyboardButton(text="🔙 Главное меню"),
+        ],
+    ],
+    resize_keyboard=True,
+)
 
 admin_menu = ReplyKeyboardMarkup(
     keyboard=[
