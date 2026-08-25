@@ -237,6 +237,7 @@ def get_or_create_player(message: Message):
 @dp.message(CommandStart())
 async def start_handler(message: Message):
     player = get_or_create_player(message)
+    mission_creation.pop(message.from_user.id, None)
     
     if message.from_user.id == ADMIN_ID:
         current_menu = admin_menu
