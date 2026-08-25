@@ -601,39 +601,39 @@ async def mission_creation_handler(message: Message):
         return
 
     if "description" not in data:
-    data["description"] = message.text
+        data["description"] = message.text
 
-    await message.answer(
-        "⚡ <b>НАГРАДА XP</b>\n\n"
-        "Напиши количество опыта за выполнение миссии.\n\n"
-        "Например: <b>100</b>"
-    )
-    return
-
-if "reward_xp" not in data:
-    try:
-        reward_xp = int(message.text)
-    except ValueError:
         await message.answer(
-            "❌ Введи число.\n\n"
+            "⚡ <b>НАГРАДА XP</b>\n\n"
+            "Напиши количество опыта за выполнение миссии.\n\n"
             "Например: <b>100</b>"
         )
         return
 
-    if reward_xp < 0:
+    if "reward_xp" not in data:
+        try:
+            reward_xp = int(message.text)
+        except ValueError:
+            await message.answer(
+                "❌ Введи число.\n\n"
+                "Например: <b>100</b>"
+            )
+            return
+
+        if reward_xp < 0:
+            await message.answer(
+                "❌ XP не может быть отрицательным."
+            )
+            return
+
+        data["reward_xp"] = reward_xp
+
         await message.answer(
-            "❌ XP не может быть отрицательным."
+            "⭐ <b>НАГРАДА ОЧКИ</b>\n\n"
+            "Напиши количество очков за выполнение миссии.\n\n"
+            "Например: <b>50</b>"
         )
         return
-
-    data["reward_xp"] = reward_xp
-
-    await message.answer(
-        "⭐ <b>НАГРАДА ОЧКИ</b>\n\n"
-        "Напиши количество очков за выполнение миссии.\n\n"
-        "Например: <b>50</b>"
-    )
-    return
         
 @dp.message()
 async def message_handler(message: Message):
