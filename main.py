@@ -600,7 +600,7 @@ async def mission_creation_handler(message: Message):
         )
         return
 
-     if "description" not in data:
+    if "description" not in data:
     data["description"] = message.text
 
     await message.answer(
