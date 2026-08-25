@@ -217,7 +217,12 @@ def get_or_create_player(message: Message):
 @dp.message(CommandStart())
 async def start_handler(message: Message):
     player = get_or_create_player(message)
-
+    
+    if message.from_user.id == ADMIN_ID:
+        current_menu = admin_menu
+    else:
+        current_menu = main_menu
+        
     await message.answer(
         f"🕵️ <b>ОХОТА</b>\n\n"
         f"Привет, <b>{message.from_user.first_name or 'охотник'}</b>!\n\n"
@@ -225,7 +230,7 @@ async def start_handler(message: Message):
         f"⭐ Очки: <b>{player[2]}</b>\n"
         f"⚡ Опыт: <b>{player[1]}</b>\n\n"
         f"🎯 Скоро здесь появятся первые миссии.",
-        reply_markup=main_menu, 
+        reply_markup=current_menu,
         )
 @dp.message(F.text == "🎯 Миссии")
 async def missions_handler(message: Message):
