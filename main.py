@@ -324,11 +324,51 @@ async def complete_mission_handler(callback):
     connection.close()
 
     if updated:
-        await callback.answer("🏁 Миссия выполнена!")
+        connection = sqlite3.connect(DB_FILE)
+        cursor = connection.cursor()
+
+        cursor.execute(
+            """
+            SELECT reward_xp, reward_score
+            FROM missions
+            WHERE id = ?
+            """,
+            (mission_id,),
+        )
+
+        reward = cursor.fetchone()
+
+        if reward:
+            reward_xp, reward_score = reward
+
+            cursor.execute(
+                """
+                UPDATE players
+                SET xp = xp + ?, score = score + ?
+                WHERE telegram_id = ?
+                """,
+                (reward_xp, reward_score, telegram_id),
+            )
+
+            cursor.execute(
+                """
+                UPDATE mission_participants
+                SET reward_given = 1
+                WHERE mission_id = ?
+                  AND telegram_id = ?
+                """,
+                (mission_id, telegram_id),
+            )
+
+            connection.commit()
+
+        connection.close()
+
+        await callback.answer("🎁 Награда получена!")
         await callback.message.answer(
             "🏁 <b>МИССИЯ ВЫПОЛНЕНА!</b>\n\n"
-            "Твоё выполнение записано.\n"
-            "Награда будет начислена после проверки."
+            f"⚡ XP: <b>+{reward_xp}</b>\n"
+            f"⭐ Очки: <b>+{reward_score}</b>"
         )
     else:
         await callback.answer(
