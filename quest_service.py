@@ -55,6 +55,9 @@ class QuestService:
 
     def get_all_missions(self):
         return self.db.get_all_missions()
+    
+    def seed_missions(self, missions):
+        self.db.seed_missions(missions)
 
     # =========================================================
     # СЦЕНЫ
