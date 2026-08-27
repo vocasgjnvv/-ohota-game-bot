@@ -9,6 +9,7 @@ from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from quest_service import QuestService
+from mission_data import MISSIONS
 
 
 logging.basicConfig(level=logging.INFO)
