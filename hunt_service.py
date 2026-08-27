@@ -622,7 +622,7 @@ class HuntService:
     # PRIZE PLACES
     # =========================================================
 
-        def calculate_prize_places(
+    def calculate_prize_places(
         self,
         hunt_id: int,
         prize_places: int = 3,
