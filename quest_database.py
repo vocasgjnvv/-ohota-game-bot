@@ -545,3 +545,25 @@ class QuestDatabase:
                 """,
                 (telegram_id,),
             ).fetchall()
+    
+    # =========================================================
+    # ЗАГРУЗКА БАЗОВЫХ 20 МИССИЙ
+    # =========================================================
+
+    def seed_missions(self, missions):
+        with self._connect() as connection:
+            for mission in missions:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO quest_missions
+                        (id, title, description, is_active)
+                    VALUES (?, ?, ?, 1)
+                    """,
+                    (
+                        mission["number"],
+                        mission["title"],
+                        mission.get("description", ""),
+                    ),
+                )
+
+            connection.commit()
