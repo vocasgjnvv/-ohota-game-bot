@@ -622,11 +622,91 @@ class HuntService:
     # PRIZE PLACES
     # =========================================================
 
-    def calculate_prize_places(
+        def calculate_prize_places(
         self,
         hunt_id: int,
         prize_places: int = 3,
     ) -> list:
+
+        if prize_places < 1:
+            raise ValueError(
+                "Количество призовых мест должно быть больше нуля."
+            )
+
+        hunt = self.get_hunt(hunt_id)
+
+        if hunt is None:
+            raise ValueError("Охота не найдена.")
+
+        # Призовые места можно фиксировать
+        # только после окончания призового периода.
+        if self._now() < self._parse_time(hunt["prize_end"]):
+            raise ValueError(
+                "Призовые места ещё нельзя фиксировать. "
+                "Призовой период ещё не закончился."
+            )
+
+        with self._connect() as connection:
+
+            # Если места уже были зафиксированы —
+            # больше их не пересчитываем.
+            already_fixed = connection.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM hunt_participants
+                WHERE hunt_id = ?
+                  AND place IS NOT NULL
+                """,
+                (hunt_id,),
+            ).fetchone()
+
+            if already_fixed["total"] > 0:
+                return connection.execute(
+                    """
+                    SELECT *
+                    FROM hunt_participants
+                    WHERE hunt_id = ?
+                      AND place IS NOT NULL
+                    ORDER BY place ASC
+                    """,
+                    (hunt_id,),
+                ).fetchall()
+
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM hunt_participants
+                WHERE hunt_id = ?
+                  AND prize_eligible = 1
+                  AND completed = 1
+                ORDER BY
+                    score DESC,
+                    finished_at ASC,
+                    telegram_id ASC
+                """,
+                (hunt_id,),
+            ).fetchall()
+
+            winners = rows[:prize_places]
+
+            for index, row in enumerate(winners, start=1):
+                connection.execute(
+                    """
+                    UPDATE hunt_participants
+                    SET place = ?
+                    WHERE hunt_id = ?
+                      AND telegram_id = ?
+                    """,
+                    (
+                        index,
+                        hunt_id,
+                        row["telegram_id"],
+                    ),
+                )
+
+            connection.commit()
+
+            return winners
 
         if prize_places < 1:
             raise ValueError(
