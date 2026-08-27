@@ -284,6 +284,8 @@ async def create_mission_start(message: Message):
 @dp.message(F.text == "🎯 Миссии")
 async def missions_handler(message: Message):
     telegram_id = message.from_user.id
+    
+    await message.answer("🔎 Проверка: кнопка Миссии работает.")
 
     try:
         statuses = quest_service.get_mission_statuses(
