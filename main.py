@@ -24,6 +24,7 @@ ADMIN_ID = 5169764277
 DB_FILE = "ohota.db"
 mission_creation = {}
 quest_service = QuestService(DB_FILE)
+quest_service.seed_missions(MISSIONS)
 
 dp = Dispatcher()
 main_menu = ReplyKeyboardMarkup(
