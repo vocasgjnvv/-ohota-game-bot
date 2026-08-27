@@ -97,6 +97,39 @@ class QuestDatabase:
                         REFERENCES quest_missions(id)
                         ON DELETE CASCADE
                 );
+                                CREATE TABLE IF NOT EXISTS quest_actions (
+                    ...
+                );
+
+                CREATE TABLE IF NOT EXISTS hunts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    registration_start TIMESTAMP NOT NULL,
+                    registration_end TIMESTAMP NOT NULL,
+                    hunt_start TIMESTAMP NOT NULL,
+                    prize_end TIMESTAMP NOT NULL,
+                    hard_close TIMESTAMP NOT NULL,
+                    status TEXT DEFAULT 'scheduled',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS hunt_participants (
+                    hunt_id INTEGER NOT NULL,
+                    telegram_id INTEGER NOT NULL,
+                    registered_at TIMESTAMP,
+                    prize_eligible INTEGER DEFAULT 0,
+                    started_at TIMESTAMP,
+                    finished_at TIMESTAMP,
+                    completed INTEGER DEFAULT 0,
+                    score INTEGER DEFAULT 0,
+                    place INTEGER,
+
+                    PRIMARY KEY (hunt_id, telegram_id),
+
+                    FOREIGN KEY (hunt_id)
+                        REFERENCES hunts(id)
+                        ON DELETE CASCADE
+                );
                 """
             )
 
