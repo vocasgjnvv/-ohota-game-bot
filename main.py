@@ -267,7 +267,6 @@ async def create_mission_start(message: Message):
 async def missions_handler(message: Message):
     telegram_id = message.from_user.id
     
-    await message.answer("🔎 Проверка: кнопка Миссии работает.")
 
     try:
         statuses = quest_service.get_mission_statuses(
@@ -308,132 +307,7 @@ async def missions_handler(message: Message):
     await message.answer(
         "\n".join(lines)
     )
-@dp.callback_query(F.data.startswith("join_mission:"))
-async def join_mission_handler(callback):
-    mission_id = int(callback.data.split(":")[1])
-    telegram_id = callback.from_user.id
-
-    connection = sqlite3.connect(DB_FILE)
-    cursor = connection.cursor()
-
-    cursor.execute(
-        """
-        INSERT OR IGNORE INTO mission_participants
-        (mission_id, telegram_id)
-        VALUES (?, ?)
-        """,
-        (mission_id, telegram_id),
-    )
-
-    connection.commit()
-
-    cursor.execute(
-        """
-        SELECT changes()
-        """
-    )
-
-    inserted = cursor.fetchone()[0]
-
-    connection.close()
-
-    if inserted:
-        await callback.answer("✅ Ты участвуешь в миссии!")
-        await callback.message.answer(
-            "🎯 <b>Участие подтверждено!</b>\n\n"
-            "Теперь выполни условия миссии."
-        )
-    else:
-        await callback.answer("ℹ️ Ты уже участвуешь в этой миссии.")
-@dp.callback_query(F.data.startswith("complete_mission:"))
-async def complete_mission_handler(callback):
-    mission_id = int(callback.data.split(":")[1])
-    telegram_id = callback.from_user.id
-
-    connection = sqlite3.connect(DB_FILE)
-    cursor = connection.cursor()
-
-    cursor.execute(
-        """
-        SELECT status, reward_given
-        FROM mission_participants
-        WHERE mission_id = ? AND telegram_id = ?
-        """,
-        (mission_id, telegram_id),
-    )
-
-    participation = cursor.fetchone()
-
-    if not participation:
-        connection.close()
-        await callback.answer("❌ Ты не участвуешь в этой миссии.")
-        return
-
-    status, reward_given = participation
-
-    if reward_given:
-        connection.close()
-        await callback.answer("ℹ️ Награда уже была получена.")
-        return
-
-    if status != "completed":
-        cursor.execute(
-            """
-            UPDATE mission_participants
-            SET status = 'completed'
-            WHERE mission_id = ? AND telegram_id = ?
-            """,
-            (mission_id, telegram_id),
-        )
-
-    cursor.execute(
-        """
-        SELECT reward_xp, reward_score
-        FROM missions
-        WHERE id = ?
-        """,
-        (mission_id,),
-    )
-
-    reward = cursor.fetchone()
-
-    if not reward:
-        connection.close()
-        await callback.answer("❌ Миссия не найдена.")
-        return
-
-    reward_xp, reward_score = reward
-
-    cursor.execute(
-        """
-        UPDATE players
-        SET xp = xp + ?,
-            score = score + ?
-        WHERE telegram_id = ?
-        """,
-        (reward_xp, reward_score, telegram_id),
-    )
-
-    cursor.execute(
-        """
-        UPDATE mission_participants
-        SET reward_given = 1,
-            status = 'completed'
-        WHERE mission_id = ? AND telegram_id = ?
-        """,
-        (mission_id, telegram_id),
-    )
-
-    connection.commit()
-    connection.close()
-
-    await callback.answer("🎁 Награда получена!")
-
-    await callback.message.answer(
-        "🏁 <b>МИССИЯ ВЫПОЛНЕНА!</b>\n\n"
-        f"⚡ XP: <b>+{reward_xp}</b>\n"
-        f"⭐ Очки: <b>+{reward_score}</b>"
-    )
+    
 @dp.message(F.text == "👤 Мой профиль")
 async def profile_handler(message: Message):
     player = get_or_create_player(message)
