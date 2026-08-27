@@ -281,79 +281,47 @@ async def create_mission_start(message: Message):
         
 @dp.message(F.text == "🎯 Миссии")
 async def missions_handler(message: Message):
-    connection = sqlite3.connect(DB_FILE)
+    telegram_id = message.from_user.id
 
-    cursor = connection.cursor()
-
-    cursor.execute(
-        """
-        SELECT id, title, description, reward_xp, reward_score
-        FROM missions
-        WHERE active = 1
-        ORDER BY id ASC
-        """
-    )
-
-    missions = cursor.fetchall()
-
-    connection.close()
-
-    if not missions:
+    try:
+        statuses = quest_service.get_mission_statuses(
+            telegram_id
+        )
+    except Exception:
+        logging.exception("Ошибка загрузки списка миссий")
         await message.answer(
-            "🎯 <b>МИССИИ</b>\n\n"
-            "Сейчас активных миссий нет."
+            "⚠️ Не удалось загрузить список миссий."
         )
         return
 
-    text = "🎯 <b>АКТИВНЫЕ МИССИИ</b>\n\n"
-
-    for mission in missions:
-        mission_id, title, description, reward_xp, reward_score = mission
-
-        connection = sqlite3.connect(DB_FILE)
-        cursor = connection.cursor()
-
-        cursor.execute(
-            """
-            SELECT id
-            FROM mission_participants
-            WHERE mission_id = ? AND telegram_id = ?
-            """,
-            (mission_id, message.from_user.id),
-        )
-
-        participation = cursor.fetchone()
-
-        connection.close()
-
-        if participation:
-            button_text = "🏁 Выполнить миссию"
-            callback_action = f"complete_mission:{mission_id}"
-        else:
-            button_text = "▶️ Участвовать"
-            callback_action = f"join_mission:{mission_id}"
-
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text=button_text,
-                        callback_data=callback_action
-                    )
-                ]
-            ]
-        )
-
+    if not statuses:
         await message.answer(
-            f"🎯 <b>Миссия №{mission_id}</b>\n"
-            f"<b>{title}</b>\n\n"
-            f"{description}\n\n"
-            f"⚡ Опыт: <b>{reward_xp}</b>\n"
-            f"⭐ Очки: <b>{reward_score}</b>",
-            reply_markup=keyboard,
+            "🎯 <b>МИССИИ</b>\n\n"
+            "Миссии пока не загружены."
+        )
+        return
+
+    lines = ["🎯 <b>МИССИИ</b>", ""]
+
+    for mission in statuses:
+        number = mission["id"]
+        title = mission["title"]
+        status = mission["status"]
+
+        if status == "completed":
+            icon = "✅"
+        elif status == "current":
+            icon = "🔓"
+        else:
+            icon = "🔒"
+
+        lines.append(
+            f"{icon} {number:02d}. {title}"
         )
 
-    await message.answer(text)
+    await message.answer(
+        "\n".join(lines)
+    )
 @dp.callback_query(F.data.startswith("join_mission:"))
 async def join_mission_handler(callback):
     mission_id = int(callback.data.split(":")[1])
