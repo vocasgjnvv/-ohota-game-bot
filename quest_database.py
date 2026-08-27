@@ -97,9 +97,7 @@ class QuestDatabase:
                         REFERENCES quest_missions(id)
                         ON DELETE CASCADE
                 );
-                                CREATE TABLE IF NOT EXISTS quest_actions (
-                    ...
-                );
+                                 
 
                 CREATE TABLE IF NOT EXISTS hunts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
